@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from jwdm.pipeline.models import PlanItemStatus, ScanRoot
+from jwdm.pipeline.models import PlanItemStatus, ScanProgress, ScanRoot, ScanStage
 from jwdm.services.scan import ScanService
 
 
@@ -58,3 +58,27 @@ def test_plan_reserves_numbered_collision_destinations(tmp_path: Path) -> None:
     destinations = {item.proposed_destination.name for item in plan.items if item.proposed_destination}
     assert destinations == {"same.pdf", "same (1).pdf"}
 
+
+def test_scan_reports_discovery_then_determinate_classification(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    nested = source / "nested"
+    library = tmp_path / "library"
+    nested.mkdir(parents=True)
+    library.mkdir()
+    (source / "report.pdf").write_text("report", encoding="utf-8")
+    (nested / "photo.png").write_text("image", encoding="utf-8")
+    progress: list[ScanProgress] = []
+
+    plan = ScanService().build_plan(
+        (ScanRoot(source, True),), library, progress.append
+    )
+
+    assert len(plan.items) == 2
+    assert progress[0].stage is ScanStage.DISCOVERING
+    classification = [event for event in progress if event.stage is ScanStage.CLASSIFYING]
+    assert classification[0].completed_items == 0
+    assert classification[0].total_items == 2
+    assert classification[-1].completed_items == 2
+    assert classification[-1].total_items == 2

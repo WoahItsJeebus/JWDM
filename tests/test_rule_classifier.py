@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from PIL import Image
+
 from jwdm.classification.rule_classifier import RuleClassifier
 from jwdm.config import ExtensionRule, RuleAction
 from jwdm.persistence.state import StateRepository
@@ -41,8 +43,9 @@ def test_manual_scan_marks_exact_exclusions_and_ignored_rules(tmp_path: Path) ->
     excluded = source / "private.pdf"
     ignored = source / "old.bak"
     normal = source / "photo.png"
-    for path in (excluded, ignored, normal):
+    for path in (excluded, ignored):
         path.write_bytes(b"data")
+    Image.new("RGB", (8, 8), "blue").save(normal)
 
     repository = StateRepository(tmp_path / "state.db")
     repository.replace_rules((ExtensionRule(".bak", RuleAction.IGNORE),))

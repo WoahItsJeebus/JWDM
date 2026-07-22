@@ -1,4 +1,4 @@
-"""Conservative built-in extension classifier for Phase 1."""
+"""Conservative built-in extension fallback for the layered classifier."""
 
 from __future__ import annotations
 
@@ -7,6 +7,25 @@ from types import MappingProxyType
 from typing import Final, Mapping
 
 from jwdm.pipeline.models import Classification, ClassificationDisposition
+
+
+IMAGE_EXTENSIONS: Final[frozenset[str]] = frozenset(
+    {
+        ".bmp",
+        ".exr",
+        ".gif",
+        ".hdr",
+        ".ico",
+        ".jpeg",
+        ".jpg",
+        ".png",
+        ".svg",
+        ".tga",
+        ".tif",
+        ".tiff",
+        ".webp",
+    }
+)
 
 
 _CATEGORY_EXTENSIONS: Final[dict[str, frozenset[str]]] = {
@@ -48,9 +67,7 @@ _CATEGORY_EXTENSIONS: Final[dict[str, frozenset[str]]] = {
         }
     ),
     "Fonts": frozenset({".otf", ".ttf", ".woff", ".woff2"}),
-    "Images": frozenset(
-        {".bmp", ".gif", ".ico", ".jpeg", ".jpg", ".png", ".svg", ".tif", ".tiff", ".webp"}
-    ),
+    "Images": IMAGE_EXTENSIONS,
     "Installers": frozenset({".appx", ".exe", ".msi", ".msix"}),
     "Video": frozenset({".avi", ".mkv", ".mov", ".mp4", ".webm", ".wmv"}),
 }

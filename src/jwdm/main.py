@@ -24,6 +24,7 @@ from jwdm.services.exclusions import ExclusionMatcher
 from jwdm.services.library_destination import LibraryDestinationService
 from jwdm.services.move_transaction import MoveError, MoveTransactionService
 from jwdm.services.operation_suppression import OperationSuppressor
+from jwdm.services.rule_suggestions import RuleSuggestionService
 from jwdm.services.scan import ScanService
 from jwdm.services.startup import StartupError, StartupManager
 from jwdm.ui.icons import build_application_icon
@@ -156,6 +157,7 @@ def run(arguments: Sequence[str] | None = None) -> int:
         ScanService(classifier=classifier, exclusion_matcher=exclusions),
         moves,
         history,
+        RuleSuggestionService(state),
     )
     automatic_service = AutomaticOrganizer(
         moves,

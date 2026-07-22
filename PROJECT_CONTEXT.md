@@ -1026,8 +1026,11 @@ and system-tray shell and emitted structured startup logs.
 source folders, per-source recursion, read-only preview planning, conservative
 extension classification, safe category correction, explicit per-file
 approval, keep-both collision handling, journaled moves, history display, and
-validated undo. Phase 1 acceptance is covered by automated tests and the
-canonical compiled test build.
+validated undo. Manual scans run outside the UI thread, show indeterminate
+discovery followed by determinate classification progress, and open a preview
+whose columns are fitted within the active screen while remaining individually
+resizable. Phase 1 acceptance is covered by automated tests and the canonical
+compiled test build.
 
 - Folder picker
 - Scan service
@@ -1091,6 +1094,16 @@ journal entries conservatively and marks ambiguous states for manual recovery.
 - Pending-operation recovery
 
 ### Phase 5: Smarter classification
+
+**Status:** Complete as of 2026-07-22. Explicit user rules remain the highest
+priority. The offline layered fallback now inspects bounded ZIP metadata and
+selected small marker content without extraction, recognizes generic PBR texture
+filename tokens, reads raster dimensions/animation/EXIF/icon signals through
+Pillow, and otherwise retains the conservative extension map. Suspicious or
+unreadable inputs are suggested for review rather than automatically routed.
+Manual category corrections offer an explicit, unchecked extension-rule
+suggestion; selected suggestions are validated and saved atomically before move
+execution.
 
 - Archive inspection
 - Image metadata
@@ -1169,6 +1182,11 @@ Do not silently decide these without recording the choice:
   database while retaining this transaction journal.
 - The organized-library choice was session-only through Phase 2. Phase 3 now
   persists it in the per-user state database.
+- Manual discovery and planning run on a background thread so a large scan does
+  not freeze the application. Discovery reports an indeterminate progress state;
+  classification reports completed and total file counts. The review dialog
+  fits all seven columns to the active screen and preserves interactive,
+  single-edge column resizing.
 - Phase 1 originally executed and undid same-volume moves only. Phase 4 now
   extends the same transaction journal and undo contract with verified
   cross-volume copying.
@@ -1248,6 +1266,38 @@ Do not silently decide these without recording the choice:
   append-only JSON Lines transaction schema remains version 1 with optional
   cross-volume metadata and checkpoint event types, preserving existing Phase 1
   history compatibility.
+
+### 25.6 Resolved Phase 5 decisions
+
+- Classification remains fully local and offline. Enabled user extension rules
+  run first, followed by bounded ZIP inspection, texture filename signals,
+  Pillow image metadata, and finally the broad built-in extension fallback.
+  Phase 5 adds no remote service, AI model, upload, execution, or archive
+  extraction.
+- ZIP is the first archive format with content-aware inspection. Member names,
+  counts, declared sizes, compression ratios, encryption flags, and traversal
+  paths are checked before signals are used. Only a bounded `__init__.py` preview
+  may be read to confirm Blender `bl_info`; no member is written to disk.
+  Recognized Blender, source-project, Minecraft, and Roblox markers are
+  high-confidence. A model/texture asset-pack signal remains review-required.
+  Other archive formats retain broad extension classification until equally safe
+  inspectors are implemented.
+- Pillow 12.3.0 is the sole new Phase 5 dependency. Raster headers provide
+  dimensions, frame count, format, and selected EXIF presence without decoding
+  complete pixel data. Photo, animated-image, and icon signals route to nested
+  `Images` categories. Decompression-bomb warnings, unreadable headers, and
+  unsupported metadata never label or delete the file; they require review with
+  `Images` as a broad suggestion. SVG continues through extension classification.
+- Common PBR filename tokens such as normal, roughness, metalness, albedo,
+  displacement, and emissive route image files to `Images/Textures`. The generic
+  category deliberately avoids assuming that interchange assets belong to
+  Blender or another specific application.
+- Setting a category during manual review can suggest a future extension rule.
+  The option is unchecked by default. Only explicitly selected suggestions are
+  converted to enabled route rules; duplicate identical suggestions are
+  deduplicated, conflicting corrections are refused, and existing rules are
+  updated atomically before filesystem moves begin. The SQLite schema remains
+  version 2 because the existing extension-rule table supports this behavior.
 
 When a decision is made, update this document.
 

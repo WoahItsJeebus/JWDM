@@ -161,26 +161,7 @@ class StateRepository:
             raise StateError(f"Rules in {self.path} contain an invalid value: {error}") from error
 
     def replace_rules(self, rules: tuple[ExtensionRule, ...]) -> None:
-        normalized: list[ExtensionRule] = []
-        extensions: set[str] = set()
-        for rule in rules:
-            try:
-                extension = normalize_extension(rule.extension)
-                category = (
-                    validate_category(rule.category)
-                    if rule.action is RuleAction.ROUTE and rule.category
-                    else None
-                )
-            except ValueError as error:
-                raise StateError(f"Invalid extension rule: {error}") from error
-            if extension in extensions:
-                raise StateError(f"Only one user rule may target {extension}.")
-            extensions.add(extension)
-            if rule.action is RuleAction.ROUTE and category is None:
-                raise StateError(f"Route rule {extension} requires a category.")
-            normalized.append(
-                replace(rule, extension=extension, category=category, rule_id=None)
-            )
+        normalized = self._normalized_rules(rules)
         with self._lock:
             try:
                 with self._connection() as connection:
@@ -201,6 +182,36 @@ class StateRepository:
                     )
             except (OSError, sqlite3.Error) as error:
                 raise StateError(f"Cannot save rules to {self.path}: {error}") from error
+
+    def upsert_rules(self, rules: tuple[ExtensionRule, ...]) -> None:
+        """Create or explicitly update correction-derived extension rules atomically."""
+
+        normalized = self._normalized_rules(rules)
+        with self._lock:
+            try:
+                with self._connection() as connection:
+                    connection.executemany(
+                        "INSERT INTO extension_rules("
+                        "extension, action, category, enabled, priority"
+                        ") VALUES(?, ?, ?, ?, ?) "
+                        "ON CONFLICT(extension) DO UPDATE SET "
+                        "action = excluded.action, category = excluded.category, "
+                        "enabled = excluded.enabled, priority = excluded.priority",
+                        (
+                            (
+                                rule.extension,
+                                rule.action.value,
+                                rule.category,
+                                int(rule.enabled),
+                                rule.priority,
+                            )
+                            for rule in normalized
+                        ),
+                    )
+            except (OSError, sqlite3.Error) as error:
+                raise StateError(
+                    f"Cannot save suggested rules to {self.path}: {error}"
+                ) from error
 
     def save_candidates(
         self, incoming_root: Path, candidates: tuple[CandidateSnapshot, ...]
@@ -403,6 +414,30 @@ class StateRepository:
     @staticmethod
     def _encode_boolean(value: bool) -> str:
         return "1" if value else "0"
+
+    @staticmethod
+    def _normalized_rules(rules: tuple[ExtensionRule, ...]) -> tuple[ExtensionRule, ...]:
+        normalized: list[ExtensionRule] = []
+        extensions: set[str] = set()
+        for rule in rules:
+            try:
+                extension = normalize_extension(rule.extension)
+                category = (
+                    validate_category(rule.category)
+                    if rule.action is RuleAction.ROUTE and rule.category
+                    else None
+                )
+            except ValueError as error:
+                raise StateError(f"Invalid extension rule: {error}") from error
+            if extension in extensions:
+                raise StateError(f"Only one user rule may target {extension}.")
+            if rule.action is RuleAction.ROUTE and category is None:
+                raise StateError(f"Route rule {extension} requires a category.")
+            extensions.add(extension)
+            normalized.append(
+                replace(rule, extension=extension, category=category, rule_id=None)
+            )
+        return tuple(normalized)
 
     @staticmethod
     def _normalized_exclusions(paths: tuple[Path, ...]) -> tuple[Path, ...]:

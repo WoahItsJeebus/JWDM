@@ -8,14 +8,20 @@ from pathlib import Path
 
 import pytest
 from PySide6.QtGui import QPalette
-from PySide6.QtWidgets import QApplication, QHeaderView, QLabel, QPushButton
+from PySide6.QtWidgets import (
+    QApplication,
+    QHeaderView,
+    QLabel,
+    QProgressBar,
+    QPushButton,
+)
 
 from jwdm import __version__
 from jwdm.logging_config import APPLICATION_LOGGER, configure_logging
 from jwdm.pipeline.models import ScanRoot
 from jwdm.services.scan import ScanService
 from jwdm.ui.main_window import MainWindow
-from jwdm.ui.manual_dialogs import ReviewDialog
+from jwdm.ui.manual_dialogs import CategoryCorrectionDialog, ReviewDialog
 from jwdm.ui.tray import TrayController
 
 
@@ -26,7 +32,7 @@ def application() -> QApplication:
 
 
 def test_package_has_version() -> None:
-    assert __version__ == "0.5.0"
+    assert __version__ == "0.6.0"
 
 
 def test_main_window_and_tray_shell(application: QApplication) -> None:
@@ -36,6 +42,35 @@ def test_main_window_and_tray_shell(application: QApplication) -> None:
     assert window.windowTitle() == "JWDM"
     organize_button = window.findChild(QPushButton, "organizeButton")
     assert organize_button is not None
+    assert organize_button.isEnabled()
+    scan_status = window.findChild(QLabel, "manualScanStatus")
+    scan_progress = window.findChild(QProgressBar, "manualScanProgress")
+    assert scan_status is not None
+    assert scan_progress is not None
+    assert scan_status.text() == "Manual scan: ready"
+    assert scan_progress.format() == "Ready"
+    window.set_manual_scan_state(
+        "Manual scan: discovering \u2014 3 files found", active=True
+    )
+    assert scan_progress.minimum() == 0
+    assert scan_progress.maximum() == 0
+    assert not organize_button.isEnabled()
+    assert not window.browse_library_button.isEnabled()
+    window.set_manual_scan_state(
+        "Manual scan: analyzing 3 of 8",
+        active=True,
+        completed=3,
+        total=8,
+    )
+    assert scan_progress.maximum() == 8
+    assert scan_progress.value() == 3
+    window.set_manual_scan_state(
+        "Manual scan: complete \u2014 8 files",
+        active=False,
+        completed=8,
+        total=8,
+    )
+    assert scan_progress.value() == 8
     assert organize_button.isEnabled()
     version_label = window.findChild(QLabel, "versionLabel")
     assert version_label is not None
@@ -88,6 +123,8 @@ def test_review_dialog_preselects_only_ready_items(
     plan = ScanService().build_plan((ScanRoot(source),), library)
 
     dialog = ReviewDialog(plan)
+    dialog.show()
+    application.processEvents()
 
     assert [item.source.name for item in dialog.selected_items()] == ["ready.pdf"]
     header = dialog.table.horizontalHeader()
@@ -105,5 +142,21 @@ def test_review_dialog_preselects_only_ready_items(
     assert dialog.table.item(ready_row, 4).toolTip() == str(
         library / "Documents" / "ready.pdf"
     )
-    assert sum(dialog.table.columnWidth(column) for column in range(7)) > dialog.width()
+    column_width = sum(dialog.table.columnWidth(column) for column in range(7))
+    assert column_width <= dialog.table.viewport().width()
+    assert dialog.table.columnWidth(6) >= 180
+    screen = dialog.screen()
+    assert dialog.width() <= int(screen.availableGeometry().width() * 0.96) + 1
+
+    review_item = next(item for item in plan.items if item.source.name == "review.unknown")
+    correction_dialog = CategoryCorrectionDialog(review_item)
+    assert ".unknown" in correction_dialog.create_rule.text()
+    assert not correction_dialog.create_rule.isChecked()
+    correction_dialog.category.setText("Custom/Reviewed")
+    correction_dialog.create_rule.setChecked(True)
+    correction_dialog.accept()
+    correction = correction_dialog.correction()
+    assert correction.category == "Custom/Reviewed"
+    assert correction.create_rule
+
     dialog.close()

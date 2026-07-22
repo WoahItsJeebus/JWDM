@@ -10,8 +10,8 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Protocol
 
-from jwdm.classification.extension_classifier import ExtensionClassifier
 from jwdm.classification.rule_classifier import Classifier
+from jwdm.classification.smart_classifier import SmartClassifier
 from jwdm.config import ConfidencePolicy
 from jwdm.logging_config import APPLICATION_LOGGER
 from jwdm.persistence.state import StateError, StateRepository
@@ -74,7 +74,7 @@ class AutomaticOrganizer:
         self._moves = moves
         self._suppressor = suppressor
         self._registry = registry or CandidateRegistry()
-        self._classifier = classifier or ExtensionClassifier()
+        self._classifier = classifier or SmartClassifier()
         self._access_probe = access_probe or WindowsAccessProbe()
         self._config = config or ReadinessConfig()
         self._stability = StabilityStage(self._config)

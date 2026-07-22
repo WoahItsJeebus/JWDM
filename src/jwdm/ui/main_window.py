@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMainWindow,
+    QProgressBar,
     QPushButton,
     QTableWidget,
     QTableWidgetItem,
@@ -48,6 +49,8 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("JWDM")
         self.setWindowIcon(build_application_icon())
         self.setMinimumSize(800, 690)
+        self._automatic_running = False
+        self._manual_scan_running = False
 
         title = QLabel("JWDM")
         title.setObjectName("applicationTitle")
@@ -79,6 +82,14 @@ class MainWindow(QMainWindow):
         self.organize_button.setMinimumHeight(50)
         self.organize_button.clicked.connect(self.organize_requested.emit)
 
+        self.manual_scan_status_label = QLabel("Manual scan: ready")
+        self.manual_scan_status_label.setObjectName("manualScanStatus")
+        self.manual_scan_progress = QProgressBar()
+        self.manual_scan_progress.setObjectName("manualScanProgress")
+        self.manual_scan_progress.setRange(0, 1)
+        self.manual_scan_progress.setValue(0)
+        self.manual_scan_progress.setFormat("Ready")
+
         self.history_button = QPushButton("History")
         self.history_button.setObjectName("historyButton")
         self.history_button.clicked.connect(self.history_requested.emit)
@@ -102,6 +113,8 @@ class MainWindow(QMainWindow):
         manual_group = QGroupBox("Manual organization")
         manual_layout = QVBoxLayout(manual_group)
         manual_layout.addWidget(self.organize_button)
+        manual_layout.addWidget(self.manual_scan_status_label)
+        manual_layout.addWidget(self.manual_scan_progress)
         manual_layout.addLayout(manual_actions)
 
         self.incoming_edit = QLineEdit()
@@ -231,13 +244,13 @@ class MainWindow(QMainWindow):
         self.undo_button.setEnabled(available)
 
     def set_automatic_state(self, running: bool, paused: bool) -> None:
+        self._automatic_running = running
         self.automatic_toggle_button.setText(
             "Stop automatic organization" if running else "Start automatic organization"
         )
         self.automatic_pause_button.setEnabled(running)
         self.automatic_pause_button.setText("Resume" if paused else "Pause")
-        self.browse_incoming_button.setEnabled(not running)
-        self.browse_library_button.setEnabled(not running)
+        self._refresh_path_controls()
         if not running:
             status = "Stopped — settings and pending candidates are saved."
         elif paused:
@@ -245,6 +258,42 @@ class MainWindow(QMainWindow):
         else:
             status = "Running — waiting for safe, stable incoming files."
         self.automatic_status_label.setText(status)
+
+    def set_manual_scan_state(
+        self,
+        status: str,
+        *,
+        active: bool,
+        completed: int = 0,
+        total: int | None = None,
+    ) -> None:
+        """Present manual-scan activity without exposing controller details."""
+
+        self._manual_scan_running = active
+        self.manual_scan_status_label.setText(status)
+        self.organize_button.setEnabled(not active)
+        self._refresh_path_controls()
+        if active and total is None:
+            self.manual_scan_progress.setRange(0, 0)
+            self.manual_scan_progress.setFormat("Discovering files\u2026")
+            return
+        if total is not None:
+            maximum = max(total, 1)
+            self.manual_scan_progress.setRange(0, maximum)
+            self.manual_scan_progress.setValue(min(completed, maximum))
+            self.manual_scan_progress.setFormat(
+                "%v of %m files" if active else "Complete \u2014 %v files"
+            )
+            return
+        self.manual_scan_progress.setRange(0, 1)
+        self.manual_scan_progress.setValue(0)
+        self.manual_scan_progress.setFormat("Stopped")
+
+    def _refresh_path_controls(self) -> None:
+        self.browse_incoming_button.setEnabled(not self._automatic_running)
+        self.browse_library_button.setEnabled(
+            not self._automatic_running and not self._manual_scan_running
+        )
 
     def set_candidates(self, candidates: tuple[CandidateSnapshot, ...]) -> None:
         visible = tuple(reversed(candidates[-12:]))

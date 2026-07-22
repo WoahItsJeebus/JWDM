@@ -7,6 +7,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QGuiApplication, QShowEvent
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -15,8 +16,8 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QHBoxLayout,
     QHeaderView,
-    QInputDialog,
     QLabel,
+    QLineEdit,
     QMessageBox,
     QPushButton,
     QTableWidget,
@@ -33,6 +34,7 @@ from jwdm.services.destinations import (
     resolve_collision,
     validate_category,
 )
+from jwdm.services.rule_suggestions import CategoryCorrection, suggested_extension
 
 
 def _format_bytes(size: int) -> str:
@@ -131,15 +133,78 @@ class FolderSelectionDialog(QDialog):
             self.table.removeRow(selected_rows[0].row())
 
 
+class CategoryCorrectionDialog(QDialog):
+    """Collect one reviewed category and an explicit optional rule request."""
+
+    def __init__(self, item: PlanItem, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._source = item.source
+        self._validated_category: str | None = None
+        self.setWindowTitle("Set destination category")
+
+        explanation = QLabel(
+            "Choose a category path inside the library, such as Documents or "
+            "Blender/Projects."
+        )
+        explanation.setWordWrap(True)
+        self.category = QLineEdit(item.category or "")
+        self.category.setObjectName("correctionCategory")
+        extension = suggested_extension(item.source)
+        if extension is None:
+            self.create_rule = QCheckBox("This filename has no supported rule extension")
+            self.create_rule.setEnabled(False)
+        else:
+            self.create_rule = QCheckBox(
+                f"Suggested: create or update a rule for future {extension} files"
+            )
+            self.create_rule.setToolTip(
+                "The rule is saved only if you check this option and approve the plan."
+            )
+        self.create_rule.setObjectName("createCorrectionRule")
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout = QVBoxLayout(self)
+        layout.addWidget(explanation)
+        layout.addWidget(self.category)
+        layout.addWidget(self.create_rule)
+        layout.addWidget(buttons)
+
+    def correction(self) -> CategoryCorrection:
+        if self._validated_category is None:
+            raise RuntimeError("Correction is available only after the dialog is accepted.")
+        return CategoryCorrection(
+            self._source,
+            self._validated_category,
+            self.create_rule.isChecked(),
+        )
+
+    def accept(self) -> None:
+        try:
+            self._validated_category = validate_category(self.category.text())
+        except CategoryValidationError as error:
+            QMessageBox.warning(self, "Invalid category", str(error))
+            return
+        super().accept()
+
+
 class ReviewDialog(QDialog):
     """Show the read-only plan and collect explicit per-file approvals."""
+
+    _DESIRED_COLUMN_WIDTHS = (52, 110, 280, 130, 360, 90, 420)
+    _MINIMUM_COLUMN_WIDTHS = (48, 75, 105, 80, 130, 65, 180)
+    _TABLE_OVERHEAD = 84
 
     def __init__(self, plan: ScanPlan, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._plan = plan
         self._items = list(plan.items)
+        self._corrections: dict[Path, CategoryCorrection] = {}
         self.setWindowTitle("Review organization plan")
-        self.resize(1100, 620)
+        self.setMinimumSize(720, 480)
 
         summary = QLabel(
             f"{len(plan.items)} items • {_format_bytes(plan.total_bytes)} • "
@@ -162,8 +227,6 @@ class ReviewDialog(QDialog):
         header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         header.setMinimumSectionSize(48)
         header.setStretchLastSection(False)
-        for column, width in enumerate((52, 110, 280, 130, 360, 90, 360)):
-            self.table.setColumnWidth(column, width)
         for row in range(len(self._items)):
             self._render_row(row)
 
@@ -196,6 +259,58 @@ class ReviewDialog(QDialog):
         layout.addLayout(controls)
         layout.addWidget(issues)
         layout.addWidget(buttons)
+        self._fit_to_screen()
+
+    def showEvent(self, event: QShowEvent) -> None:
+        super().showEvent(event)
+        self._fit_to_screen()
+
+    def _fit_to_screen(self) -> None:
+        screen = None
+        if self.parentWidget() is not None:
+            parent = self.parentWidget()
+            screen = QGuiApplication.screenAt(
+                parent.mapToGlobal(parent.rect().center())
+            )
+        if screen is None:
+            screen = self.screen() or QGuiApplication.primaryScreen()
+        if screen is None:
+            available_width, available_height = 1280, 720
+        else:
+            available = screen.availableGeometry()
+            available_width, available_height = available.width(), available.height()
+
+        maximum_width = max(720, int(available_width * 0.96))
+        maximum_height = max(480, int(available_height * 0.9))
+        desired_width = sum(self._DESIRED_COLUMN_WIDTHS) + self._TABLE_OVERHEAD
+        dialog_width = min(desired_width, maximum_width)
+        dialog_height = min(620, maximum_height)
+        column_budget = max(0, dialog_width - self._TABLE_OVERHEAD)
+        for column, width in enumerate(self._fit_column_widths(column_budget)):
+            self.table.setColumnWidth(column, width)
+        self.resize(dialog_width, dialog_height)
+
+    @classmethod
+    def _fit_column_widths(cls, budget: int) -> tuple[int, ...]:
+        desired = cls._DESIRED_COLUMN_WIDTHS
+        minimum = cls._MINIMUM_COLUMN_WIDTHS
+        if budget >= sum(desired):
+            return desired
+        if budget <= sum(minimum):
+            ratio = budget / sum(minimum) if budget else 0
+            return tuple(max(36, int(width * ratio)) for width in minimum)
+
+        available_extra = budget - sum(minimum)
+        desired_extra = sum(desired) - sum(minimum)
+        widths = [
+            floor + int((target - floor) * available_extra / desired_extra)
+            for floor, target in zip(minimum, desired, strict=True)
+        ]
+        remainder = budget - sum(widths)
+        priorities = (6, 4, 2, 3, 1, 5, 0)
+        for offset in range(remainder):
+            widths[priorities[offset % len(priorities)]] += 1
+        return tuple(widths)
 
     def selected_items(self) -> tuple[PlanItem, ...]:
         approved: list[PlanItem] = []
@@ -208,6 +323,9 @@ class ReviewDialog(QDialog):
             ):
                 approved.append(item)
         return tuple(approved)
+
+    def corrections(self) -> tuple[CategoryCorrection, ...]:
+        return tuple(self._corrections.values())
 
     def accept(self) -> None:
         if not self.selected_items():
@@ -273,22 +391,19 @@ class ReviewDialog(QDialog):
             return
         row = selected[0].row()
         current = self._items[row]
-        category, accepted = QInputDialog.getText(
-            self,
-            "Set destination category",
-            "Category path inside the library (for example, Documents or Blender/Projects):",
-            text=current.category or "",
-        )
-        if not accepted:
+        editor = CategoryCorrectionDialog(current, self)
+        if editor.exec() != QDialog.DialogCode.Accepted:
             return
+        correction = editor.correction()
         try:
-            safe_category = validate_category(category)
             reserved = {
                 os.path.normcase(str(item.proposed_destination.resolve(strict=False)))
                 for index, item in enumerate(self._items)
                 if index != row and item.proposed_destination is not None
             }
-            base = destination_for(self._plan.library_root, safe_category, current.source.name)
+            base = destination_for(
+                self._plan.library_root, correction.category, current.source.name
+            )
             proposed, collision = resolve_collision(base, reserved)
         except CategoryValidationError as error:
             QMessageBox.warning(self, "Invalid category", str(error))
@@ -296,12 +411,17 @@ class ReviewDialog(QDialog):
         self._items[row] = replace(
             current,
             status=PlanItemStatus.READY,
-            category=safe_category,
+            category=correction.category,
             confidence="user",
-            reason="Category selected during review",
+            reason=(
+                "Category selected during review; extension rule requested"
+                if correction.create_rule
+                else "Category selected during review"
+            ),
             proposed_destination=proposed,
             collision_behavior=collision,
         )
+        self._corrections[current.source] = correction
         self._render_row(row)
         self.table.selectRow(row)
 

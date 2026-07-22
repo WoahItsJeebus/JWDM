@@ -1,4 +1,4 @@
-"""Typed Phase 3 settings and user-rule models."""
+"""Typed application settings and user-rule models."""
 
 from __future__ import annotations
 

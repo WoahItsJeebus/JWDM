@@ -1,4 +1,4 @@
-"""Phase 3 settings and basic extension-rule editors."""
+"""Application settings and extension-rule editors."""
 
 from __future__ import annotations
 

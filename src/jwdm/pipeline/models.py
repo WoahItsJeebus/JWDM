@@ -14,6 +14,11 @@ class PlanItemStatus(StrEnum):
     EXCLUDED = "Excluded"
 
 
+class ScanStage(StrEnum):
+    DISCOVERING = "discovering"
+    CLASSIFYING = "classifying"
+
+
 class ClassificationDisposition(StrEnum):
     ROUTE = "route"
     REVIEW = "review"
@@ -52,6 +57,14 @@ class PlanItem:
 class ScanIssue:
     path: Path
     message: str
+
+
+@dataclass(frozen=True, slots=True)
+class ScanProgress:
+    stage: ScanStage
+    completed_items: int
+    total_items: int | None
+    current_path: Path
 
 
 @dataclass(frozen=True, slots=True)

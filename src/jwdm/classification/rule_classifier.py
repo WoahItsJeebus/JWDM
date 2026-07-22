@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Protocol
 
-from jwdm.classification.extension_classifier import ExtensionClassifier
+from jwdm.classification.smart_classifier import SmartClassifier
 from jwdm.config import ExtensionRule, RuleAction
 from jwdm.pipeline.models import Classification, ClassificationDisposition
 
@@ -19,7 +19,7 @@ class Classifier(Protocol):
 
 
 class RuleClassifier:
-    """Evaluate enabled user rules first, then use the offline built-in map."""
+    """Evaluate enabled user rules first, then use layered offline signals."""
 
     def __init__(
         self,
@@ -27,7 +27,7 @@ class RuleClassifier:
         fallback: Classifier | None = None,
     ) -> None:
         self._rules = rules
-        self._fallback = fallback or ExtensionClassifier()
+        self._fallback = fallback or SmartClassifier()
 
     def classify(self, path: Path) -> Classification:
         filename = path.name.casefold()
