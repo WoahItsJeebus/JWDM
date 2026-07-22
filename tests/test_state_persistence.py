@@ -10,6 +10,8 @@ import pytest
 from jwdm.config import (
     AppSettings,
     ConfidencePolicy,
+    DownloadsRelocationRecord,
+    DownloadsRelocationState,
     ExtensionRule,
     RuleAction,
     VolumeBinding,
@@ -105,6 +107,7 @@ def test_phase_three_database_migrates_volume_binding_schema(tmp_path: Path) -> 
     StateRepository(path)
     with sqlite3.connect(path) as connection:
         connection.execute("DROP TABLE volume_bindings")
+        connection.execute("DROP TABLE downloads_relocation")
         connection.execute("PRAGMA user_version = 1")
 
     repository = StateRepository(path)
@@ -120,4 +123,27 @@ def test_phase_three_database_migrates_volume_binding_schema(tmp_path: Path) -> 
 
     assert repository.volume_binding("library") == binding
     with sqlite3.connect(path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 3
+
+
+def test_phase_four_database_migrates_downloads_restore_schema(tmp_path: Path) -> None:
+    path = tmp_path / "state.db"
+    StateRepository(path)
+    with sqlite3.connect(path) as connection:
+        connection.execute("DROP TABLE downloads_relocation")
+        connection.execute("PRAGMA user_version = 2")
+
+    repository = StateRepository(path)
+    timestamp = datetime.now(UTC)
+    record = DownloadsRelocationRecord(
+        original_path=tmp_path / "Downloads",
+        relocated_path=tmp_path / "Incoming",
+        state=DownloadsRelocationState.PREPARED,
+        created_at=timestamp,
+        updated_at=timestamp,
+    )
+    repository.save_downloads_relocation(record)
+
+    assert repository.downloads_relocation() == record
+    with sqlite3.connect(path) as connection:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 3

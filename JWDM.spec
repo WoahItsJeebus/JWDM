@@ -1,13 +1,13 @@
 # -*- mode: python ; coding: utf-8 -*-
 """Tracked PyInstaller definition for JWDM test and release builds."""
 
-import os
 from pathlib import Path
 
 
 project_root = Path(SPECPATH)
 source_root = project_root / "src"
-release_build = os.environ.get("JWDM_BUILD_KIND") == "release"
+version_file = project_root / "assets" / "JWDM.version"
+icon_file = project_root / "assets" / "JWDM.ico"
 
 analysis = Analysis(
     [str(source_root / "jwdm" / "main.py")],
@@ -28,8 +28,8 @@ python_archive = PYZ(analysis.pure)
 executable = EXE(
     python_archive,
     analysis.scripts,
-    analysis.binaries if release_build else [],
-    analysis.datas if release_build else [],
+    [],
+    [],
     [],
     name="JWDM",
     debug=False,
@@ -42,17 +42,17 @@ executable = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    exclude_binaries=not release_build,
+    exclude_binaries=True,
+    icon=str(icon_file),
+    version=str(version_file),
 )
 
-if not release_build:
-    bundle = COLLECT(
-        executable,
-        analysis.binaries,
-        analysis.datas,
-        strip=False,
-        upx=False,
-        upx_exclude=[],
-        name="JWDM",
-    )
-
+bundle = COLLECT(
+    executable,
+    analysis.binaries,
+    analysis.datas,
+    strip=False,
+    upx=False,
+    upx_exclude=[],
+    name="JWDM",
+)

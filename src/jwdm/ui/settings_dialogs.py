@@ -122,10 +122,45 @@ class SettingsDialog(QDialog):
         exclusions_layout.addWidget(self.exclusions)
         exclusions_layout.addLayout(exclusion_actions)
 
+        self.downloads_path = QLabel("Current Downloads location: unavailable")
+        self.downloads_path.setObjectName("downloadsCurrentPath")
+        self.downloads_path.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        self.downloads_detail = QLabel(
+            "Windows Downloads relocation status is unavailable."
+        )
+        self.downloads_detail.setObjectName("downloadsRelocationStatus")
+        self.downloads_detail.setWordWrap(True)
+        self.relocate_downloads_button = QPushButton("Relocate Windows Downloads\u2026")
+        self.relocate_downloads_button.setObjectName("relocateDownloadsButton")
+        self.relocate_downloads_button.setEnabled(False)
+        self.restore_downloads_button = QPushButton("Restore recorded location")
+        self.restore_downloads_button.setObjectName("restoreDownloadsButton")
+        self.restore_downloads_button.setEnabled(False)
+        downloads_actions = QHBoxLayout()
+        downloads_actions.addWidget(self.relocate_downloads_button)
+        downloads_actions.addWidget(self.restore_downloads_button)
+        downloads_actions.addStretch()
+        downloads_note = QLabel(
+            "Relocation changes the per-user Windows known-folder path. JWDM does not "
+            "move files already in either folder; organize them separately through the "
+            "normal preview workflow. Some applications keep their own download path."
+        )
+        downloads_note.setWordWrap(True)
+        downloads = QWidget()
+        downloads_layout = QVBoxLayout(downloads)
+        downloads_layout.addWidget(self.downloads_path)
+        downloads_layout.addWidget(self.downloads_detail)
+        downloads_layout.addLayout(downloads_actions)
+        downloads_layout.addWidget(downloads_note)
+        downloads_layout.addStretch()
+
         tabs = QTabWidget()
         tabs.addTab(general, "General")
         tabs.addTab(automation, "Automation")
         tabs.addTab(exclusions, "Exclusions")
+        tabs.addTab(downloads, "Windows Downloads")
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Save
@@ -154,6 +189,25 @@ class SettingsDialog(QDialog):
             exclusions=exclusions,
         )
 
+    def set_downloads_status(
+        self,
+        current_path: Path | None,
+        detail: str,
+        *,
+        can_relocate: bool,
+        can_restore: bool,
+    ) -> None:
+        current = str(current_path) if current_path is not None else "unavailable"
+        self.downloads_path.setText(f"Current Downloads location: {current}")
+        self.downloads_detail.setText(detail)
+        self.relocate_downloads_button.setEnabled(can_relocate)
+        self.restore_downloads_button.setEnabled(can_restore)
+
+    def set_base_settings(self, settings: AppSettings) -> None:
+        """Keep path-only controller changes when the dialog is later saved."""
+
+        self._initial = settings
+
     def _add_exclusion(self) -> None:
         selected = QFileDialog.getExistingDirectory(self, "Choose folder to exclude")
         if not selected:
@@ -169,6 +223,88 @@ class SettingsDialog(QDialog):
     def _remove_exclusion(self) -> None:
         for item in self.exclusions.selectedItems():
             self.exclusions.takeItem(self.exclusions.row(item))
+
+
+class DownloadsRelocationDialog(QDialog):
+    """Collect an explicit target and confirmation for known-folder relocation."""
+
+    def __init__(self, current_path: Path, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Relocate Windows Downloads")
+        self.resize(680, 330)
+
+        explanation = QLabel(
+            "Choose an existing local folder for future Windows downloads. This changes "
+            "the per-user Windows known-folder path only. Existing files remain exactly "
+            "where they are and are not copied, moved, merged, or deleted."
+        )
+        explanation.setWordWrap(True)
+        current = QLineEdit(str(current_path))
+        current.setReadOnly(True)
+        current.setObjectName("currentDownloadsPath")
+        self.target = QLineEdit()
+        self.target.setReadOnly(True)
+        self.target.setObjectName("proposedDownloadsPath")
+        browse = QPushButton("Browse\u2026")
+        browse.clicked.connect(self._browse)
+        target_row = QHBoxLayout()
+        target_row.addWidget(self.target, stretch=1)
+        target_row.addWidget(browse)
+
+        form = QFormLayout()
+        form.addRow("Current Downloads", current)
+        form.addRow("Proposed Downloads", target_row)
+
+        self.use_as_incoming = QCheckBox(
+            "Use the relocated Downloads folder as JWDM's incoming folder"
+        )
+        self.use_as_incoming.setObjectName("useRelocatedDownloadsAsIncoming")
+        self.use_as_incoming.setChecked(True)
+        warning = QLabel(
+            "Applications with their own download preference may continue using their "
+            "configured path. You can restore the recorded original location from Settings."
+        )
+        warning.setWordWrap(True)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok
+            | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText(
+            "Relocate Downloads"
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(explanation)
+        layout.addLayout(form)
+        layout.addWidget(self.use_as_incoming)
+        layout.addWidget(warning)
+        layout.addStretch()
+        layout.addWidget(buttons)
+
+    @property
+    def target_path(self) -> Path | None:
+        value = self.target.text().strip()
+        return Path(value) if value else None
+
+    def accept(self) -> None:
+        if self.target_path is None:
+            QMessageBox.warning(
+                self,
+                "No destination selected",
+                "Choose the proposed Windows Downloads folder first.",
+            )
+            return
+        super().accept()
+
+    def _browse(self) -> None:
+        selected = QFileDialog.getExistingDirectory(
+            self, "Choose the new Windows Downloads folder"
+        )
+        if selected:
+            self.target.setText(selected)
 
 
 class ExtensionRuleDialog(QDialog):

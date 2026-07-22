@@ -16,6 +16,8 @@ from typing import Final
 from jwdm.config import (
     AppSettings,
     ConfidencePolicy,
+    DownloadsRelocationRecord,
+    DownloadsRelocationState,
     ExtensionRule,
     RuleAction,
     VolumeBinding,
@@ -24,7 +26,7 @@ from jwdm.config import (
 from jwdm.pipeline.candidate import CandidateSnapshot, CandidateState
 from jwdm.services.destinations import validate_category
 
-STATE_SCHEMA_VERSION: Final = 2
+STATE_SCHEMA_VERSION: Final = 3
 
 
 class StateError(RuntimeError):
@@ -319,6 +321,67 @@ class StateRepository:
                     f"Cannot save volume binding to {self.path}: {error}"
                 ) from error
 
+    def downloads_relocation(self) -> DownloadsRelocationRecord | None:
+        """Return the single durable Downloads relocation checkpoint, if any."""
+
+        with self._lock:
+            try:
+                with self._connection() as connection:
+                    row = connection.execute(
+                        "SELECT original_path, relocated_path, state, created_at, "
+                        "updated_at, error FROM downloads_relocation WHERE record_id = 1"
+                    ).fetchone()
+            except (OSError, sqlite3.Error) as error:
+                raise StateError(
+                    f"Cannot read Downloads relocation state from {self.path}: {error}"
+                ) from error
+        if row is None:
+            return None
+        try:
+            return DownloadsRelocationRecord(
+                original_path=Path(str(row[0])),
+                relocated_path=Path(str(row[1])),
+                state=DownloadsRelocationState(str(row[2])),
+                created_at=datetime.fromisoformat(str(row[3])),
+                updated_at=datetime.fromisoformat(str(row[4])),
+                error=str(row[5]) if row[5] is not None else None,
+            )
+        except (TypeError, ValueError) as error:
+            raise StateError(
+                f"Downloads relocation state in {self.path} is invalid: {error}"
+            ) from error
+
+    def save_downloads_relocation(self, record: DownloadsRelocationRecord) -> None:
+        """Atomically create or advance the durable Downloads restore record."""
+
+        if not record.original_path.is_absolute() or not record.relocated_path.is_absolute():
+            raise StateError("Downloads relocation paths must be absolute.")
+        with self._lock:
+            try:
+                with self._connection() as connection:
+                    connection.execute(
+                        "INSERT INTO downloads_relocation("
+                        "record_id, original_path, relocated_path, state, created_at, "
+                        "updated_at, error) VALUES(1, ?, ?, ?, ?, ?, ?) "
+                        "ON CONFLICT(record_id) DO UPDATE SET "
+                        "original_path = excluded.original_path, "
+                        "relocated_path = excluded.relocated_path, "
+                        "state = excluded.state, created_at = excluded.created_at, "
+                        "updated_at = excluded.updated_at, error = excluded.error",
+                        (
+                            str(record.original_path),
+                            str(record.relocated_path),
+                            record.state.value,
+                            record.created_at.isoformat(),
+                            record.updated_at.isoformat(),
+                            record.error,
+                        ),
+                    )
+            except (OSError, sqlite3.Error) as error:
+                raise StateError(
+                    f"Cannot save Downloads relocation state to {self.path}: {error}"
+                ) from error
+
     def _migrate(self) -> None:
         with self._lock:
             try:
@@ -379,6 +442,25 @@ class StateRepository:
                             """
                         )
                         version = 2
+                    if version == 2:
+                        connection.executescript(
+                            """
+                            CREATE TABLE downloads_relocation(
+                                record_id INTEGER PRIMARY KEY CHECK(record_id = 1),
+                                original_path TEXT NOT NULL,
+                                relocated_path TEXT NOT NULL,
+                                state TEXT NOT NULL CHECK(state IN (
+                                    'prepared', 'active', 'restore_prepared',
+                                    'restored', 'rolled_back', 'recovery_required'
+                                )),
+                                created_at TEXT NOT NULL,
+                                updated_at TEXT NOT NULL,
+                                error TEXT
+                            );
+                            PRAGMA user_version = 3;
+                            """
+                        )
+                        version = 3
                     if version != STATE_SCHEMA_VERSION:
                         raise StateError(
                             f"State database migration stopped at schema {version}; "

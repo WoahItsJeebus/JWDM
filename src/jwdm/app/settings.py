@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import replace
 from pathlib import Path
 
@@ -14,9 +15,18 @@ from jwdm.config import AppSettings
 from jwdm.logging_config import APPLICATION_LOGGER
 from jwdm.persistence.state import StateError, StateRepository
 from jwdm.services.library_destination import LibraryDestinationService
+from jwdm.services.downloads import (
+    DownloadsRelocationError,
+    DownloadsRelocationService,
+    DownloadsStatus,
+)
 from jwdm.services.startup import StartupError, StartupManager
 from jwdm.ui.main_window import MainWindow
-from jwdm.ui.settings_dialogs import RulesDialog, SettingsDialog
+from jwdm.ui.settings_dialogs import (
+    DownloadsRelocationDialog,
+    RulesDialog,
+    SettingsDialog,
+)
 from jwdm.ui.tray import TrayController
 
 
@@ -31,6 +41,7 @@ class SettingsController:
         startup: StartupManager,
         settings: AppSettings,
         library_destination: LibraryDestinationService | None = None,
+        downloads: DownloadsRelocationService | None = None,
     ) -> None:
         self._application = application
         self._window = window
@@ -38,6 +49,7 @@ class SettingsController:
         self._startup = startup
         self._settings = settings
         self._library_destination = library_destination
+        self._downloads = downloads
         self._destination_status = None
         self._tray: TrayController | None = None
         self._tray_available = False
@@ -81,6 +93,13 @@ class SettingsController:
 
     def show_settings(self) -> None:
         dialog = SettingsDialog(self._settings, self._window)
+        self._refresh_downloads_dialog(dialog)
+        dialog.relocate_downloads_button.clicked.connect(
+            lambda: self._relocate_downloads(dialog)
+        )
+        dialog.restore_downloads_button.clicked.connect(
+            lambda: self._restore_downloads(dialog)
+        )
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         updated = dialog.selected_settings()
@@ -105,6 +124,211 @@ class SettingsController:
             return
         self._settings = updated
         self._logger.info("Settings saved", extra={"event": "settings_saved"})
+
+    def _relocate_downloads(self, dialog: SettingsDialog) -> None:
+        if self._downloads is None:
+            return
+        if self._window.file_operations_busy:
+            QMessageBox.information(
+                self._window,
+                "Stop organization first",
+                "Stop automatic organization and wait for the manual scan to finish "
+                "before changing the Windows Downloads location.",
+            )
+            return
+        try:
+            status = self._downloads.status()
+        except (DownloadsRelocationError, StateError) as error:
+            QMessageBox.critical(
+                self._window, "Downloads location unavailable", str(error)
+            )
+            self._refresh_downloads_dialog(dialog)
+            return
+        if status.current_path is None or not status.can_relocate:
+            QMessageBox.warning(
+                self._window,
+                "Downloads cannot be relocated",
+                status.detail,
+            )
+            return
+        editor = DownloadsRelocationDialog(status.current_path, dialog)
+        if editor.exec() != QDialog.DialogCode.Accepted:
+            return
+        target = editor.target_path
+        if target is None:
+            return
+        try:
+            updated_status = self._downloads.relocate(
+                target,
+                library_path=self._settings.library_path,
+            )
+        except (DownloadsRelocationError, StateError) as error:
+            QMessageBox.critical(
+                self._window,
+                "Downloads relocation needs attention",
+                "JWDM could not confirm a clean relocation. Existing files were not "
+                f"moved. Reopen Settings and check the reported current path.\n\n{error}",
+            )
+            self._refresh_downloads_dialog(dialog)
+            return
+
+        incoming_updated = True
+        if editor.use_as_incoming.isChecked() and updated_status.current_path is not None:
+            incoming_updated = self._save_incoming_path(
+                updated_status.current_path, dialog
+            )
+        self._apply_downloads_status(dialog, updated_status)
+        message = (
+            f"Windows Downloads now points to:\n{updated_status.current_path}\n\n"
+            "Existing files were left unchanged."
+        )
+        if not incoming_updated:
+            message += (
+                "\n\nThe JWDM incoming-folder setting could not be saved; choose it "
+                "again before starting automatic organization."
+            )
+            QMessageBox.warning(self._window, "Downloads relocated", message)
+        else:
+            QMessageBox.information(self._window, "Downloads relocated", message)
+
+    def _restore_downloads(self, dialog: SettingsDialog) -> None:
+        if self._downloads is None:
+            return
+        if self._window.file_operations_busy:
+            QMessageBox.information(
+                self._window,
+                "Stop organization first",
+                "Stop automatic organization and wait for the manual scan to finish "
+                "before restoring the Windows Downloads location.",
+            )
+            return
+        try:
+            status = self._downloads.status()
+        except (DownloadsRelocationError, StateError) as error:
+            QMessageBox.critical(
+                self._window, "Downloads location unavailable", str(error)
+            )
+            self._refresh_downloads_dialog(dialog)
+            return
+        record = status.record
+        if not status.can_restore or record is None:
+            QMessageBox.warning(
+                self._window,
+                "Downloads cannot be restored automatically",
+                status.detail,
+            )
+            return
+        confirmation = QMessageBox.question(
+            self._window,
+            "Restore Windows Downloads?",
+            f"Change Windows Downloads from:\n{status.current_path}\n\n"
+            f"back to the recorded location:\n{record.original_path}\n\n"
+            "Files in both folders will remain unchanged.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if confirmation != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            restored = self._downloads.restore()
+        except (DownloadsRelocationError, StateError) as error:
+            QMessageBox.critical(
+                self._window,
+                "Downloads restore needs attention",
+                "JWDM could not confirm a clean restore. Existing files were not moved. "
+                f"Reopen Settings and check the reported current path.\n\n{error}",
+            )
+            self._refresh_downloads_dialog(dialog)
+            return
+
+        incoming_updated = True
+        if (
+            self._settings.incoming_path is not None
+            and restored.current_path is not None
+            and self._paths_match(
+                self._settings.incoming_path,
+                record.relocated_path,
+            )
+        ):
+            incoming_updated = self._save_incoming_path(
+                restored.current_path, dialog
+            )
+        self._apply_downloads_status(dialog, restored)
+        message = (
+            f"Windows Downloads was restored to:\n{restored.current_path}\n\n"
+            "Files in both locations were left unchanged."
+        )
+        if not incoming_updated:
+            message += (
+                "\n\nThe JWDM incoming-folder setting could not be updated; verify it "
+                "before starting automatic organization."
+            )
+            QMessageBox.warning(self._window, "Downloads restored", message)
+        else:
+            QMessageBox.information(self._window, "Downloads restored", message)
+
+    def _refresh_downloads_dialog(self, dialog: SettingsDialog) -> None:
+        if self._downloads is None:
+            dialog.set_downloads_status(
+                None,
+                "Windows Downloads relocation is unavailable in this build.",
+                can_relocate=False,
+                can_restore=False,
+            )
+            return
+        try:
+            status = self._downloads.status()
+        except (DownloadsRelocationError, StateError) as error:
+            self._logger.error(
+                "Downloads relocation status unavailable",
+                extra={"event": "downloads_status_error"},
+                exc_info=True,
+            )
+            dialog.set_downloads_status(
+                None,
+                str(error),
+                can_relocate=False,
+                can_restore=False,
+            )
+            return
+        self._apply_downloads_status(dialog, status)
+
+    @staticmethod
+    def _apply_downloads_status(
+        dialog: SettingsDialog,
+        status: DownloadsStatus,
+    ) -> None:
+        dialog.set_downloads_status(
+            status.current_path,
+            status.detail,
+            can_relocate=status.can_relocate,
+            can_restore=status.can_restore,
+        )
+
+    def _save_incoming_path(
+        self,
+        path: Path,
+        dialog: SettingsDialog,
+    ) -> bool:
+        updated = replace(self._settings, incoming_path=path)
+        try:
+            self._repository.save_settings(updated)
+        except StateError:
+            self._logger.exception(
+                "Downloads changed but incoming setting was not saved",
+                extra={"event": "downloads_incoming_persistence_error"},
+            )
+            return False
+        self._settings = updated
+        self._window.incoming_edit.setText(str(path))
+        dialog.set_base_settings(updated)
+        return True
+
+    @staticmethod
+    def _paths_match(first: Path, second: Path) -> bool:
+        return os.path.normcase(str(first.resolve(strict=False))) == os.path.normcase(
+            str(second.resolve(strict=False))
+        )
 
     def show_rules(self) -> None:
         try:

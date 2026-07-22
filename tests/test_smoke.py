@@ -17,11 +17,13 @@ from PySide6.QtWidgets import (
 )
 
 from jwdm import __version__
+from jwdm.config import AppSettings
 from jwdm.logging_config import APPLICATION_LOGGER, configure_logging
 from jwdm.pipeline.models import ScanRoot
 from jwdm.services.scan import ScanService
 from jwdm.ui.main_window import MainWindow
 from jwdm.ui.manual_dialogs import CategoryCorrectionDialog, ReviewDialog
+from jwdm.ui.settings_dialogs import DownloadsRelocationDialog, SettingsDialog
 from jwdm.ui.tray import TrayController
 
 
@@ -32,7 +34,7 @@ def application() -> QApplication:
 
 
 def test_package_has_version() -> None:
-    assert __version__ == "0.6.0"
+    assert __version__ == "1.0.0"
 
 
 def test_main_window_and_tray_shell(application: QApplication) -> None:
@@ -160,3 +162,32 @@ def test_review_dialog_preselects_only_ready_items(
     assert correction.create_rule
 
     dialog.close()
+
+
+def test_downloads_settings_expose_explicit_relocate_and_restore_controls(
+    application: QApplication, tmp_path: Path
+) -> None:
+    settings = SettingsDialog(AppSettings())
+    relocate = settings.findChild(QPushButton, "relocateDownloadsButton")
+    restore = settings.findChild(QPushButton, "restoreDownloadsButton")
+    assert relocate is not None
+    assert restore is not None
+    assert not relocate.isEnabled()
+    assert not restore.isEnabled()
+
+    current = tmp_path / "Downloads"
+    settings.set_downloads_status(
+        current,
+        "No JWDM Downloads relocation is recorded.",
+        can_relocate=True,
+        can_restore=False,
+    )
+    assert relocate.isEnabled()
+    assert not restore.isEnabled()
+    assert str(current) in settings.downloads_path.text()
+
+    confirmation = DownloadsRelocationDialog(current)
+    assert "Existing files remain" in confirmation.findChild(QLabel).text()
+    assert confirmation.use_as_incoming.isChecked()
+    confirmation.close()
+    settings.close()

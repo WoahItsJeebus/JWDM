@@ -5,13 +5,10 @@ transparent organization of downloaded files.
 
 ## Current scope
 
-The repository is currently at **Phase 5**. JWDM includes the complete manual,
-automatic, rules, settings, and external-library workflows plus bounded ZIP
-inspection, raster metadata classification, texture filename signals, and
-explicit review corrections that can become durable user rules.
-
-Windows Downloads relocation, restore, installer/signing, and update work remain
-intentionally deferred to Phase 6.
+JWDM has completed **Phase 6** and the planned 1.0 feature phases. It includes
+the manual and automatic organization workflows, rules and settings, resilient
+external-library handling, bounded offline smart classification, reversible
+Windows Downloads relocation, and release packaging.
 
 ## Manual organization
 
@@ -62,11 +59,26 @@ destination, and only then remove the unchanged source.
 - Closing the window minimizes to the tray by default when a tray is available;
   the tray's **Exit** command always stops JWDM.
 
+## Windows Downloads relocation
+
+The **Windows Downloads** tab in Settings can redirect the current user's
+Windows Downloads known folder to an existing local folder and later restore the
+recorded original location. JWDM uses the supported Windows Known Folder API,
+records a recovery checkpoint before changing Windows, verifies the resulting
+path, and does not edit the registry directly.
+
+Relocation never copies, merges, moves, or deletes files already in either
+folder. Existing files can be organized separately through the normal preview
+workflow. Relocation and restore are disabled while automatic organization or a
+manual scan is active, and unsafe overlaps, network paths, drive roots,
+symlinks, and junctions are refused.
+
 ## Requirements
 
 - Windows 10 or Windows 11, 64-bit
 - Python 3.12, 64-bit
 - PowerShell 5.1 or newer
+- Inno Setup 6 or 7 only for release-installer builds
 
 ## Build and run
 
@@ -88,8 +100,16 @@ Optional switches:
 .\Build.ps1 -Release
 ```
 
-`-Release` currently produces a one-file packaging check at
-`dist\release\JWDM.exe`; release signing and installer work remain deferred.
+`-Release` produces an installed-layout onedir application at
+`dist\release\JWDM\JWDM.exe`, a per-user installer at
+`dist\installer\JWDM-Setup-1.0.0-x64.exe`, and SHA-256 checksums. Use
+`-Release -SkipInstaller` only for an application-only packaging check when Inno
+Setup is unavailable.
+
+Official releases must use `-RequireSignature` with the project owner's
+Authenticode certificate. Local unsigned release builds are permitted for
+packaging validation but are not publishable releases. The complete signing,
+installer, and update policy is in [docs/RELEASE.md](docs/RELEASE.md).
 
 ## Run tests directly
 
@@ -102,5 +122,5 @@ After the first build has created the environment:
 Runtime logs use JSON Lines format at `%LOCALAPPDATA%\JWDM\logs\jwdm.log.jsonl`.
 The append-only move/undo and recovery journal is stored at
 `%LOCALAPPDATA%\JWDM\history.jsonl`. Settings, rules, exclusions, pending
-candidate paths, and the organized-library volume binding are stored separately
-in `%LOCALAPPDATA%\JWDM\state.db`.
+candidate paths, organized-library volume binding, and Downloads restore record
+are stored separately in `%LOCALAPPDATA%\JWDM\state.db`.

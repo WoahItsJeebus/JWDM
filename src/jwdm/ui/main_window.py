@@ -225,6 +225,10 @@ class MainWindow(QMainWindow):
         value = self.incoming_edit.text().strip()
         return Path(value) if value else None
 
+    @property
+    def file_operations_busy(self) -> bool:
+        return self._automatic_running or self._manual_scan_running
+
     def set_library_path(self, path: Path) -> None:
         self.library_edit.setText(str(path))
         self.library_path_changed.emit(path)

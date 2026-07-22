@@ -966,21 +966,17 @@ Checklist:
 25. Tracked PyInstaller spec.
 26. Compiled executable launches successfully.
 
-### Deferred until after MVP
+### Remaining post-1.0 ideas
 
-- Smart archive classification
-- PBR texture-family recognition
-- EXIF-based photo classification
 - Browser integrations
 - Download URL/source-site rules
 - Multiple automatic incoming folders, unless easy to support correctly
-- Windows Downloads relocation, unless shell behavior is first researched and tested carefully
 - Cloud sync
 - AI classification
 - Plugin marketplace
 - Automatic online rule downloads
 - Complex renaming templates
-- Full installer and auto-updater
+- Background auto-updater
 
 Architecture should leave room for these without prematurely implementing them.
 
@@ -1113,6 +1109,16 @@ execution.
 
 ### Phase 6: Downloads relocation and release polish
 
+**Status:** Complete as of 2026-07-22. Version 1.0.0 adds an explicit Settings
+flow for per-user Windows Downloads relocation and restore through the supported
+Known Folder API. A schema-v3 checkpoint is written before each shell change,
+the reported path is verified afterward, interrupted states reconcile on
+restart, and existing files are never moved by relocation. Release builds now
+carry Windows product/version metadata and the packaged JWDM icon, use an onedir
+layout inside a per-user Inno Setup installer, generate SHA-256 checksums, and
+support enforced SHA-256/RFC-3161 Authenticode signing. Version 1.0 deliberately
+uses signed installer upgrades rather than a background self-updater.
+
 - Windows known-folder relocation
 - Restore flow
 - Installer
@@ -1153,12 +1159,10 @@ Do not silently decide these without recording the choice:
 
 - Final visual design and icon
 - License
-- Whether Downloads relocation lands in MVP or post-MVP
-- Release format: one-file, one-folder plus installer, or both
 - History retention default
 - Quiet-period defaults after real-world testing
 - Network-folder support
-- Code-signing approach
+- Code-signing certificate provider and final publisher identity
 
 ### 25.1 Resolved foundation decisions
 
@@ -1298,6 +1302,49 @@ Do not silently decide these without recording the choice:
   deduplicated, conflicting corrections are refused, and existing rules are
   updated atomically before filesystem moves begin. The SQLite schema remains
   version 2 because the existing extension-rule table supports this behavior.
+
+### 25.7 Resolved Phase 6 decisions
+
+- JWDM 1.0 redirects the current user's Downloads folder with
+  `SHGetKnownFolderPath` and `SHSetKnownFolderPath` for `FOLDERID_Downloads`.
+  Direct registry editing and elevation are not used. The target must be an
+  existing writable local folder under 260 characters and cannot be a drive
+  root, network path, symbolic link, junction, current-folder overlap, or
+  organized-library overlap.
+- Relocation changes only the Windows known-folder path. It never copies, moves,
+  merges, overwrites, or deletes files already in the original or target folder.
+  Existing content remains eligible for the ordinary manual scan, preview, and
+  separately confirmed transaction workflow. Some applications may retain
+  their own independent download-path preference, which the UI states.
+- SQLite schema version 3 stores one exact Downloads relocation restore record.
+  `prepared`, `active`, `restore_prepared`, `restored`, `rolled_back`, and
+  `recovery_required` states preserve the original and target before each shell
+  mutation. Startup/status reconciliation trusts the shell's observed path and
+  refuses to guess when it matches neither recorded location.
+- Relocation and restore require explicit UI actions and are refused while a
+  manual scan or automatic organization is active. Using the relocated folder
+  as JWDM's incoming folder is a separate, explicit checkbox. Restore changes
+  that setting back only when it still points at the recorded relocated folder.
+- Version 1.0.0 release packaging uses a PyInstaller onedir application wrapped
+  by an Inno Setup per-user installer under `%LOCALAPPDATA%\Programs\JWDM`.
+  This avoids one-file extraction on every launch and does not require
+  administrator rights. The stable installer AppId supports in-place upgrades;
+  mutable state remains outside the install directory. Commercial distribution
+  must satisfy the selected Inno Setup version's licensing terms.
+- `JWDM.exe` embeds the JWDM icon plus file description, company, product,
+  original filename, and four-part Windows version metadata. `Build.ps1`
+  verifies metadata and writes release SHA-256 checksums.
+- Official releases require `Build.ps1 -Release -RequireSignature` with a
+  project-owner Authenticode certificate. The executable, installer, and
+  uninstaller use SHA-256 signatures and RFC 3161 SHA-256 timestamps and are
+  verified during the build. Certificates and private keys never enter the
+  repository. Unsigned release builds are local packaging checks only.
+- Version 1.0 has no background self-updater. Updates use newer signed,
+  versioned installers published with checksums. Any future notification-only
+  checker must use authenticated metadata, disclose no user paths or contents,
+  require approval, and verify both digest and publisher signature before
+  launching an installer. The current installation remains untouched on any
+  verification failure.
 
 When a decision is made, update this document.
 

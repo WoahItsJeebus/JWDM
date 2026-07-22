@@ -16,11 +16,16 @@ from jwdm.app.automatic_organize import AutomaticOrganizeController
 from jwdm.app.manual_organize import ManualOrganizeController
 from jwdm.app.settings import SettingsController
 from jwdm.classification.rule_classifier import RuleClassifier
+from jwdm.config import DownloadsRelocationState
 from jwdm.logging_config import APPLICATION_LOGGER, configure_logging
 from jwdm.persistence.history import HistoryRepository
 from jwdm.persistence.state import StateError, StateRepository
 from jwdm.services.automatic_organizer import AutomaticOrganizer
 from jwdm.services.exclusions import ExclusionMatcher
+from jwdm.services.downloads import (
+    DownloadsRelocationError,
+    DownloadsRelocationService,
+)
 from jwdm.services.library_destination import LibraryDestinationService
 from jwdm.services.move_transaction import MoveError, MoveTransactionService
 from jwdm.services.operation_suppression import OperationSuppressor
@@ -108,6 +113,37 @@ def run(arguments: Sequence[str] | None = None) -> int:
         return 1
 
     main_window = MainWindow()
+    downloads = DownloadsRelocationService(state)
+    try:
+        downloads_status = downloads.status()
+    except (DownloadsRelocationError, StateError) as error:
+        logger.error(
+            "Downloads relocation checkpoint could not be reconciled",
+            extra={"event": "downloads_reconciliation_error"},
+            exc_info=True,
+        )
+        QMessageBox.warning(
+            main_window,
+            "Windows Downloads status unavailable",
+            "JWDM could not verify the Windows Downloads restore record. No Downloads "
+            f"change was attempted.\n\n{error}",
+        )
+    else:
+        if (
+            downloads_status.record is not None
+            and downloads_status.record.state
+            is DownloadsRelocationState.RECOVERY_REQUIRED
+        ):
+            logger.warning(
+                "Downloads relocation requires manual recovery",
+                extra={"event": "downloads_recovery_required"},
+            )
+            QMessageBox.warning(
+                main_window,
+                "Windows Downloads needs attention",
+                f"{downloads_status.detail}\n\nOpen Settings > Windows Downloads before "
+                "making another relocation change.",
+            )
     startup = StartupManager.for_current_process()
     settings_controller = SettingsController(
         application,
@@ -116,6 +152,7 @@ def run(arguments: Sequence[str] | None = None) -> int:
         startup,
         settings,
         library_destination,
+        downloads,
     )
     try:
         settings_controller.synchronize_startup()

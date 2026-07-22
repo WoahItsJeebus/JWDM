@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
 
@@ -21,6 +22,17 @@ class RuleAction(StrEnum):
     ROUTE = "route"
     REVIEW = "review"
     IGNORE = "ignore"
+
+
+class DownloadsRelocationState(StrEnum):
+    """Durable checkpoints around a Windows Downloads redirection."""
+
+    PREPARED = "prepared"
+    ACTIVE = "active"
+    RESTORE_PREPARED = "restore_prepared"
+    RESTORED = "restored"
+    ROLLED_BACK = "rolled_back"
+    RECOVERY_REQUIRED = "recovery_required"
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,6 +73,18 @@ class VolumeBinding:
     serial_number: int | None = None
     filesystem: str | None = None
     label: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class DownloadsRelocationRecord:
+    """Restore information persisted before changing the shell known folder."""
+
+    original_path: Path
+    relocated_path: Path
+    state: DownloadsRelocationState
+    created_at: datetime
+    updated_at: datetime
+    error: str | None = None
 
 
 _EXTENSION_PATTERN = re.compile(r"^\.[a-z0-9][a-z0-9._+-]{0,31}$")
