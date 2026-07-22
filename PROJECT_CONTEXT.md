@@ -1007,6 +1007,10 @@ The MVP is acceptable when:
 
 ### Phase 0: Foundation and executable shell
 
+**Status:** Complete as of 2026-07-22. The canonical onedir test build was
+verified through `Build.ps1`; the compiled executable started its main window
+and system-tray shell and emitted structured startup logs.
+
 - Create project metadata and package structure.
 - Add a minimal PySide6 window.
 - Add tray support stub.
@@ -1103,8 +1107,6 @@ Do not silently decide these without recording the choice:
 
 - Final visual design and icon
 - License
-- Exact supported Python minor version
-- Dependency locking tool
 - Whether settings share SQLite or use a separate file
 - Exact startup mechanism
 - Exact Windows file-lock probing implementation
@@ -1116,6 +1118,14 @@ Do not silently decide these without recording the choice:
 - Quiet-period defaults after real-world testing
 - Network-folder support
 - Code-signing approach
+
+### 25.1 Resolved foundation decisions
+
+- Phase 0 supports 64-bit CPython 3.12. Project metadata expresses
+  `>=3.12,<3.13`, and `Build.ps1` selects and validates that interpreter.
+- Phase 0 dependencies are captured as exact pins in `requirements.lock`,
+  resolved from the supported Windows/Python environment. No additional
+  dependency-locking tool is introduced at this stage.
 
 When a decision is made, update this document.
 
