@@ -12,6 +12,16 @@ from pathlib import Path
 from typing import Final
 
 APPLICATION_LOGGER: Final = "jwdm"
+_STRUCTURED_FIELDS: Final = (
+    "operation_id",
+    "candidate_id",
+    "state",
+    "source",
+    "destination",
+    "category",
+    "outcome",
+    "count",
+)
 
 
 class JsonFormatter(logging.Formatter):
@@ -27,6 +37,9 @@ class JsonFormatter(logging.Formatter):
         }
         if record.exc_info is not None:
             payload["exception"] = self.formatException(record.exc_info)
+        for field in _STRUCTURED_FIELDS:
+            if hasattr(record, field):
+                payload[field] = getattr(record, field)
         return json.dumps(payload, ensure_ascii=False)
 
 
@@ -67,4 +80,3 @@ def configure_logging(log_directory: Path | None = None) -> Path:
     logger.addHandler(handler)
 
     return log_path
-

@@ -1,4 +1,4 @@
-# Phase 0 dependency set resolved for 64-bit CPython 3.12 on Windows.
+# Dependency set resolved for 64-bit CPython 3.12 on Windows.
 # Build.ps1 installs this file, then installs the local package without dependencies.
 altgraph==0.17.5
 colorama==0.4.6
@@ -16,3 +16,4 @@ pytest==9.1.1
 pywin32-ctypes==0.2.3
 setuptools==83.0.0
 shiboken6==6.11.1
+watchdog==6.0.0

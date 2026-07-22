@@ -1022,6 +1022,13 @@ and system-tray shell and emitted structured startup logs.
 
 ### Phase 1: Manual scan and preview
 
+**Status:** Complete as of 2026-07-22. The manual workflow supports multiple
+source folders, per-source recursion, read-only preview planning, conservative
+extension classification, safe category correction, explicit per-file
+approval, keep-both collision handling, journaled moves, history display, and
+validated undo. Phase 1 acceptance is covered by automated tests and the
+canonical compiled test build.
+
 - Folder picker
 - Scan service
 - Path validation
@@ -1032,6 +1039,14 @@ and system-tray shell and emitted structured startup logs.
 
 ### Phase 2: Automatic watcher and readiness
 
+**Status:** Complete as of 2026-07-22. One session-configured, nonrecursive
+incoming folder is monitored through watchdog. Events are deduplicated into an
+in-memory candidate registry, temporary names defer, stability and quiet-period
+sampling reset on changes, a restrictive Win32 access probe gates readiness,
+known high-confidence types move through the Phase 1 transaction service, and
+unknown types remain queued for review. Main-window and tray controls provide
+pause/resume and pending-state visibility.
+
 - Watcher
 - Candidate registry
 - Temporary detection
@@ -1041,6 +1056,15 @@ and system-tray shell and emitted structured startup logs.
 - Pending UI
 
 ### Phase 3: Rules and settings
+
+**Status:** Complete as of 2026-07-22. Basic user extension rules support route,
+review, and ignore actions ahead of built-in classification. A migrated SQLite
+state database persists configured paths, settings, exclusions, rules, and
+pending candidate paths. Automatic confidence policy, opt-in existing-file
+catch-up, per-user Windows startup registration, launch-minimized behavior, and
+configurable close-to-tray behavior are wired through the main window and tray.
+Restored candidates restart readiness sampling rather than inheriting stale
+safety observations.
 
 - Rule editor
 - Start with Windows
@@ -1107,11 +1131,6 @@ Do not silently decide these without recording the choice:
 
 - Final visual design and icon
 - License
-- Whether settings share SQLite or use a separate file
-- Exact startup mechanism
-- Exact Windows file-lock probing implementation
-- Default category profile for general versus creator users
-- Whether automatic mode defaults to auto-move or review-first
 - Whether Downloads relocation lands in MVP or post-MVP
 - Release format: one-file, one-folder plus installer, or both
 - History retention default
@@ -1126,6 +1145,71 @@ Do not silently decide these without recording the choice:
 - Phase 0 dependencies are captured as exact pins in `requirements.lock`,
   resolved from the supported Windows/Python environment. No additional
   dependency-locking tool is introduced at this stage.
+
+### 25.2 Resolved Phase 1 decisions
+
+- The initial built-in category profile is conservative and general-purpose.
+  Blender `.blend` projects use `Blender/Projects`; generic interchange formats
+  such as FBX, OBJ, glTF, and STL use `3D Models` rather than being presented as
+  inherently Blender-specific. Unknown extensions require review.
+- Phase 1 collision handling defaults to numbered keep-both destinations. No
+  existing destination is replaced or deleted.
+- Phase 1 move and undo transitions use an append-only JSON Lines journal under
+  `%LOCALAPPDATA%\JWDM\history.jsonl`. This is intentionally limited operational
+  history. Phase 3 subsequently resolved settings storage as a separate SQLite
+  database while retaining this transaction journal.
+- The organized-library choice was session-only through Phase 2. Phase 3 now
+  persists it in the per-user state database.
+- Phase 1 executes and undoes same-volume moves only. Cross-volume requests are
+  explicitly deferred without moving the source; verified cross-volume copy and
+  external-library resilience remain Phase 4 work.
+
+### 25.3 Resolved Phase 2 decisions
+
+- Phase 2 uses watchdog 6.0.0 and monitors one top-level incoming folder per
+  session. Existing files are not automatically scanned when monitoring starts;
+  Phase 3 adds an explicit opt-in setting for closed-app catch-up.
+- The active candidate registry remains thread-safe and in memory. Phase 3
+  persists pending paths across restarts and resets their readiness sampling;
+  crash recovery for pending filesystem move operations remains Phase 4 scope.
+- The provisional readiness defaults are a 750 ms sample interval, four stable
+  samples, and a minimum three-second quiet period. Size or modification-time
+  changes restart sampling, and any filesystem event restarts the quiet window.
+- The Windows access gate calls `CreateFileW` with `GENERIC_READ` and a zero
+  share mode, then closes the handle immediately. Access denied, sharing
+  violations, antivirus contention, and other open failures defer with backoff
+  rather than fail or move the candidate.
+- Automatic mode moves only built-in high-confidence extension matches after all
+  readiness gates pass. Unknown or lower-confidence classifications remain in
+  place as `Needs review`.
+- Watcher events caused by both manual and automatic JWDM moves are suppressed
+  by normalized source/destination identities for a short bounded period.
+
+### 25.4 Resolved Phase 3 decisions
+
+- Phase 3 uses `%LOCALAPPDATA%\JWDM\state.db`, a standard-library SQLite
+  database with explicit `PRAGMA user_version` migrations. It stores settings,
+  configured paths, basic extension rules, exclusions, and pending candidate
+  paths. The append-only `history.jsonl` move/undo journal remains separate so
+  filesystem transaction history keeps its existing recovery semantics.
+- Basic user rules match filename extensions and support route-to-category,
+  require-review, and ignore actions. Enabled user rules are evaluated before
+  built-in extension mappings. More complex metadata and archive rules remain
+  in their later phases.
+- Automatic confidence policy initially offers two conservative choices: move
+  recognized built-in or explicit-rule matches after readiness passes, or send
+  every automatic candidate to review. Unknown formats never auto-move.
+- Configured exclusions match an exact normalized path or descendants of an
+  excluded folder. They apply to manual recursion and automatic candidates.
+- Start with Windows uses the current user's
+  `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` value, targets the
+  current executable, repairs stale commands, and requires no elevation.
+- Close-to-tray is enabled by default when a system tray is available and shows
+  a one-time notice. The tray Exit action remains an unconditional real exit.
+- Pending candidate paths persist across restarts. Restored candidates discard
+  prior stability/access observations and pass the full readiness pipeline
+  again. Scanning other top-level files that arrived while JWDM was closed is an
+  explicit opt-in setting.
 
 When a decision is made, update this document.
 

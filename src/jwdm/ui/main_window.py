@@ -1,28 +1,53 @@
-"""Phase 0 main window shell."""
+"""JWDM main window for manual and automatic organization workflows."""
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
+from pathlib import Path
+
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QCloseEvent, QPalette
 from PySide6.QtWidgets import (
+    QAbstractItemView,
+    QGroupBox,
+    QHBoxLayout,
+    QHeaderView,
     QLabel,
+    QLineEdit,
     QMainWindow,
     QPushButton,
+    QTableWidget,
+    QTableWidgetItem,
     QVBoxLayout,
     QWidget,
 )
 
+from jwdm import __version__
+from jwdm.pipeline.candidate import CandidateSnapshot, CandidateState
 from jwdm.ui.icons import build_application_icon
 
 
 class MainWindow(QMainWindow):
-    """Minimal window proving the desktop application foundation."""
+    """Present application state and emit user intents to controllers."""
+
+    organize_requested = Signal()
+    library_browse_requested = Signal()
+    history_requested = Signal()
+    undo_requested = Signal()
+    incoming_browse_requested = Signal()
+    automatic_toggle_requested = Signal()
+    automatic_pause_requested = Signal()
+    settings_requested = Signal()
+    rules_requested = Signal()
+    close_requested = Signal(object)
+    library_path_changed = Signal(object)
+    incoming_path_changed = Signal(object)
 
     def __init__(self) -> None:
         super().__init__()
         self.setObjectName("mainWindow")
         self.setWindowTitle("JWDM")
         self.setWindowIcon(build_application_icon())
-        self.setMinimumSize(520, 320)
+        self.setMinimumSize(800, 690)
 
         title = QLabel("JWDM")
         title.setObjectName("applicationTitle")
@@ -35,34 +60,203 @@ class MainWindow(QMainWindow):
         subtitle = QLabel("Jeebus' Windows Download Manager")
         subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-        phase = QLabel("Phase 0 foundation is running.")
-        phase.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        library_label = QLabel("Organized library")
+        self.library_edit = QLineEdit()
+        self.library_edit.setObjectName("libraryPath")
+        self.library_edit.setReadOnly(True)
+        self.library_edit.setPlaceholderText("Choose where categorized files will be placed")
+        self.browse_library_button = QPushButton("Browse…")
+        self.browse_library_button.setObjectName("browseLibraryButton")
+        self.browse_library_button.clicked.connect(self.library_browse_requested.emit)
+        library_row = QHBoxLayout()
+        library_row.addWidget(self.library_edit, stretch=1)
+        library_row.addWidget(self.browse_library_button)
 
-        organize_button = QPushButton("Organize")
-        organize_button.setObjectName("organizeButton")
-        organize_button.setMinimumHeight(52)
-        organize_button.setEnabled(False)
-        organize_button.setToolTip("Folder organization will be added in Phase 1.")
+        self.organize_button = QPushButton("Organize folders…")
+        self.organize_button.setObjectName("organizeButton")
+        self.organize_button.setMinimumHeight(50)
+        self.organize_button.clicked.connect(self.organize_requested.emit)
 
-        scope_note = QLabel("Organizer features are intentionally unavailable in this build.")
+        self.history_button = QPushButton("History")
+        self.history_button.setObjectName("historyButton")
+        self.history_button.clicked.connect(self.history_requested.emit)
+        self.undo_button = QPushButton("Undo last move")
+        self.undo_button.setObjectName("undoButton")
+        self.undo_button.setEnabled(False)
+        self.undo_button.clicked.connect(self.undo_requested.emit)
+        self.rules_button = QPushButton("Rules")
+        self.rules_button.setObjectName("rulesButton")
+        self.rules_button.clicked.connect(self.rules_requested.emit)
+        self.settings_button = QPushButton("Settings")
+        self.settings_button.setObjectName("settingsButton")
+        self.settings_button.clicked.connect(self.settings_requested.emit)
+        manual_actions = QHBoxLayout()
+        manual_actions.addWidget(self.history_button)
+        manual_actions.addWidget(self.undo_button)
+        manual_actions.addStretch()
+        manual_actions.addWidget(self.rules_button)
+        manual_actions.addWidget(self.settings_button)
+
+        manual_group = QGroupBox("Manual organization")
+        manual_layout = QVBoxLayout(manual_group)
+        manual_layout.addWidget(self.organize_button)
+        manual_layout.addLayout(manual_actions)
+
+        self.incoming_edit = QLineEdit()
+        self.incoming_edit.setObjectName("incomingPath")
+        self.incoming_edit.setReadOnly(True)
+        self.incoming_edit.setPlaceholderText("Choose one incoming folder to monitor")
+        self.browse_incoming_button = QPushButton("Browse…")
+        self.browse_incoming_button.setObjectName("browseIncomingButton")
+        self.browse_incoming_button.clicked.connect(self.incoming_browse_requested.emit)
+        incoming_row = QHBoxLayout()
+        incoming_row.addWidget(self.incoming_edit, stretch=1)
+        incoming_row.addWidget(self.browse_incoming_button)
+
+        self.automatic_toggle_button = QPushButton("Start automatic organization")
+        self.automatic_toggle_button.setObjectName("automaticToggleButton")
+        self.automatic_toggle_button.clicked.connect(self.automatic_toggle_requested.emit)
+        self.automatic_pause_button = QPushButton("Pause")
+        self.automatic_pause_button.setObjectName("automaticPauseButton")
+        self.automatic_pause_button.setEnabled(False)
+        self.automatic_pause_button.clicked.connect(self.automatic_pause_requested.emit)
+        automatic_actions = QHBoxLayout()
+        automatic_actions.addWidget(self.automatic_toggle_button)
+        automatic_actions.addWidget(self.automatic_pause_button)
+        automatic_actions.addStretch()
+
+        self.automatic_status_label = QLabel("Stopped — settings and pending candidates are saved.")
+        self.automatic_status_label.setObjectName("automaticStatus")
+        self.candidate_counts_label = QLabel("Pending: 0 • Needs review: 0")
+        self.candidate_counts_label.setObjectName("candidateCounts")
+
+        self.candidate_table = QTableWidget(0, 3)
+        self.candidate_table.setObjectName("candidateTable")
+        self.candidate_table.setHorizontalHeaderLabels(["File", "State", "Detail"])
+        self.candidate_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.candidate_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.candidate_table.horizontalHeader().setSectionResizeMode(
+            0, QHeaderView.ResizeMode.Stretch
+        )
+        self.candidate_table.horizontalHeader().setSectionResizeMode(
+            1, QHeaderView.ResizeMode.ResizeToContents
+        )
+        self.candidate_table.horizontalHeader().setSectionResizeMode(
+            2, QHeaderView.ResizeMode.Stretch
+        )
+        self.candidate_table.setMaximumHeight(180)
+
+        automatic_group = QGroupBox("Automatic organization")
+        automatic_layout = QVBoxLayout(automatic_group)
+        automatic_layout.addWidget(QLabel("Incoming folder (top level only)"))
+        automatic_layout.addLayout(incoming_row)
+        automatic_layout.addLayout(automatic_actions)
+        automatic_layout.addWidget(self.automatic_status_label)
+        automatic_layout.addWidget(self.candidate_counts_label)
+        automatic_layout.addWidget(self.candidate_table)
+
+        self.activity_label = QLabel("No organization activity yet.")
+        self.activity_label.setObjectName("recentActivity")
+        self.activity_label.setWordWrap(True)
+        self.activity_label.setStyleSheet(
+            "QLabel { background: palette(alternate-base); border-radius: 6px; padding: 10px; }"
+        )
+
+        scope_note = QLabel(
+            "Automatic mode only moves recognized files allowed by the confidence policy "
+            "after stability and exclusive-access checks. Unknown formats remain in place."
+        )
         scope_note.setAlignment(Qt.AlignmentFlag.AlignCenter)
         scope_note.setWordWrap(True)
 
         layout = QVBoxLayout()
-        layout.setContentsMargins(48, 40, 48, 40)
-        layout.setSpacing(16)
-        layout.addStretch()
+        layout.setContentsMargins(38, 24, 38, 30)
+        layout.setSpacing(12)
         layout.addWidget(title)
         layout.addWidget(subtitle)
-        layout.addSpacing(12)
-        layout.addWidget(phase)
-        layout.addWidget(organize_button)
+        layout.addWidget(library_label)
+        layout.addLayout(library_row)
+        layout.addWidget(manual_group)
+        layout.addWidget(automatic_group)
+        layout.addWidget(QLabel("Recent activity"))
+        layout.addWidget(self.activity_label)
         layout.addWidget(scope_note)
-        layout.addStretch()
 
         content = QWidget()
         content.setLayout(layout)
         self.setCentralWidget(content)
+
+        self.version_label = QLabel(f"v{__version__}")
+        self.version_label.setObjectName("versionLabel")
+        self.version_label.setToolTip(f"JWDM version {__version__}")
+        version_palette = self.version_label.palette()
+        version_color = version_palette.color(QPalette.ColorRole.WindowText)
+        version_color.setAlphaF(0.72)
+        version_palette.setColor(QPalette.ColorRole.WindowText, version_color)
+        self.version_label.setPalette(version_palette)
+        self.version_label.setStyleSheet(
+            "QLabel { padding: 0 6px 2px 0; }"
+        )
+        self.statusBar().addPermanentWidget(self.version_label)
+
+    @property
+    def library_path(self) -> Path | None:
+        value = self.library_edit.text().strip()
+        return Path(value) if value else None
+
+    @property
+    def incoming_path(self) -> Path | None:
+        value = self.incoming_edit.text().strip()
+        return Path(value) if value else None
+
+    def set_library_path(self, path: Path) -> None:
+        self.library_edit.setText(str(path))
+        self.library_path_changed.emit(path)
+
+    def set_incoming_path(self, path: Path) -> None:
+        self.incoming_edit.setText(str(path))
+        self.incoming_path_changed.emit(path)
+
+    def set_recent_activity(self, message: str) -> None:
+        self.activity_label.setText(message)
+
+    def set_undo_available(self, available: bool) -> None:
+        self.undo_button.setEnabled(available)
+
+    def set_automatic_state(self, running: bool, paused: bool) -> None:
+        self.automatic_toggle_button.setText(
+            "Stop automatic organization" if running else "Start automatic organization"
+        )
+        self.automatic_pause_button.setEnabled(running)
+        self.automatic_pause_button.setText("Resume" if paused else "Pause")
+        self.browse_incoming_button.setEnabled(not running)
+        self.browse_library_button.setEnabled(not running)
+        if not running:
+            status = "Stopped — settings and pending candidates are saved."
+        elif paused:
+            status = "Paused — new events are queued but no candidates are processed."
+        else:
+            status = "Running — waiting for safe, stable incoming files."
+        self.automatic_status_label.setText(status)
+
+    def set_candidates(self, candidates: tuple[CandidateSnapshot, ...]) -> None:
+        visible = tuple(reversed(candidates[-12:]))
+        self.candidate_table.setRowCount(len(visible))
+        for row, candidate in enumerate(visible):
+            values = (candidate.source_path.name, candidate.state.value, candidate.detail)
+            for column, value in enumerate(values):
+                item = QTableWidgetItem(value)
+                item.setToolTip(str(candidate.source_path))
+                self.candidate_table.setItem(row, column, item)
+        pending = sum(
+            candidate.state
+            not in {CandidateState.MOVED, CandidateState.FAILED, CandidateState.EXCLUDED}
+            for candidate in candidates
+        )
+        review = sum(
+            candidate.state is CandidateState.NEEDS_REVIEW for candidate in candidates
+        )
+        self.candidate_counts_label.setText(f"Pending: {pending} • Needs review: {review}")
 
     def bring_to_front(self) -> None:
         """Show and focus the existing main window."""
@@ -73,3 +267,10 @@ class MainWindow(QMainWindow):
         self.raise_()
         self.activateWindow()
 
+    def closeEvent(self, event: QCloseEvent) -> None:
+        """Delegate the configured close decision to the application controller."""
+
+        event.accept()
+        self.close_requested.emit(event)
+        if event.isAccepted():
+            super().closeEvent(event)

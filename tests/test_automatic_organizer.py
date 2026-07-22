@@ -1,0 +1,296 @@
+from __future__ import annotations
+
+import os
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+
+from jwdm.config import ConfidencePolicy
+from jwdm.persistence.history import HistoryRepository
+from jwdm.persistence.state import StateRepository
+from jwdm.pipeline.candidate import CandidateState
+from jwdm.pipeline.result import StageOutcome, StageResult
+from jwdm.pipeline.stages.access import AccessProbe
+from jwdm.pipeline.stages.stability import ReadinessConfig
+from jwdm.services.automatic_organizer import AutomaticOrganizer
+from jwdm.services.move_transaction import MoveTransactionService
+from jwdm.services.operation_suppression import OperationSuppressor
+from jwdm.watcher.events import FileWatchEvent, WatchEventType
+
+
+class _AlwaysAvailable:
+    def probe(self, path: Path) -> StageResult:
+        return StageResult(StageOutcome.PASS, "available")
+
+
+class _BlockedThenAvailable:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def probe(self, path: Path) -> StageResult:
+        self.calls += 1
+        if self.calls == 1:
+            return StageResult(StageOutcome.DEFER, "simulated sharing violation", 32)
+        return StageResult(StageOutcome.PASS, "available")
+
+
+class _FakeWatcher:
+    def __init__(self) -> None:
+        self.started = False
+
+    def start(self) -> None:
+        self.started = True
+
+    def stop(self) -> None:
+        self.started = False
+
+
+class _WatcherFactory:
+    def __init__(self) -> None:
+        self.watcher = _FakeWatcher()
+
+    def __call__(self, root: Path, callback, suppressor) -> _FakeWatcher:
+        return self.watcher
+
+
+def _service(
+    tmp_path: Path,
+    access_probe: AccessProbe | None = None,
+    *,
+    confidence_policy=None,
+) -> tuple[AutomaticOrganizer, Path, Path, HistoryRepository]:
+    incoming = tmp_path / "incoming"
+    library = tmp_path / "library"
+    incoming.mkdir()
+    library.mkdir()
+    history = HistoryRepository(tmp_path / "history.jsonl")
+    suppressor = OperationSuppressor()
+    config = ReadinessConfig(
+        sample_interval_seconds=3600,
+        required_stable_samples=2,
+        minimum_quiet_seconds=1,
+        retry_base_seconds=1,
+        retry_max_seconds=4,
+    )
+    organizer = AutomaticOrganizer(
+        MoveTransactionService(history, suppressor),
+        suppressor,
+        access_probe=access_probe or _AlwaysAvailable(),
+        config=config,
+        watcher_factory=_WatcherFactory(),
+        confidence_policy=confidence_policy,
+    )
+    organizer.start(incoming, library)
+    return organizer, incoming, library, history
+
+
+def test_stable_known_file_is_moved_once_and_recorded(tmp_path: Path) -> None:
+    organizer, incoming, library, history = _service(tmp_path)
+    started = datetime(2026, 1, 1, tzinfo=UTC)
+    source = incoming / "report.pdf"
+    source.write_bytes(b"report")
+    organizer.handle_event(FileWatchEvent(WatchEventType.CREATED, source), started)
+    organizer.handle_event(FileWatchEvent(WatchEventType.MODIFIED, source), started)
+    try:
+        assert len(organizer.snapshots()) == 1
+        organizer.tick(started)
+        assert source.exists()
+        organizer.tick(started + timedelta(seconds=1))
+
+        assert not source.exists()
+        assert (library / "Documents" / "report.pdf").read_bytes() == b"report"
+        assert organizer.snapshots()[0].state is CandidateState.MOVED
+        assert history.latest_undoable() is not None
+    finally:
+        organizer.stop()
+
+
+def test_changing_file_waits_then_moves_after_new_quiet_window(tmp_path: Path) -> None:
+    organizer, incoming, library, _ = _service(tmp_path)
+    started = datetime(2026, 1, 1, tzinfo=UTC)
+    source = incoming / "growing.pdf"
+    source.write_bytes(b"one")
+    organizer.handle_event(FileWatchEvent(WatchEventType.CREATED, source), started)
+    try:
+        organizer.tick(started)
+        source.write_bytes(b"one plus more")
+        os.utime(source, ns=(2_000_000_000, 2_000_000_000))
+        organizer.handle_event(
+            FileWatchEvent(WatchEventType.MODIFIED, source),
+            started + timedelta(milliseconds=500),
+        )
+        organizer.tick(started + timedelta(milliseconds=500))
+        organizer.tick(started + timedelta(seconds=1))
+        assert source.exists()
+
+        organizer.tick(started + timedelta(seconds=1.5))
+        assert not source.exists()
+        assert (library / "Documents" / "growing.pdf").exists()
+    finally:
+        organizer.stop()
+
+
+def test_partial_rename_keeps_identity_and_runs_full_readiness(tmp_path: Path) -> None:
+    organizer, incoming, library, _ = _service(tmp_path)
+    started = datetime(2026, 1, 1, tzinfo=UTC)
+    partial = incoming / "download.crdownload"
+    final = incoming / "download.pdf"
+    partial.write_bytes(b"complete")
+    organizer.handle_event(FileWatchEvent(WatchEventType.CREATED, partial), started)
+    try:
+        organizer.tick(started)
+        original_id = organizer.snapshots()[0].candidate_id
+        assert organizer.snapshots()[0].state is CandidateState.DOWNLOADING
+        partial.rename(final)
+        organizer.handle_event(
+            FileWatchEvent(WatchEventType.MOVED, partial, final),
+            started + timedelta(seconds=1),
+        )
+        assert organizer.snapshots()[0].candidate_id == original_id
+        organizer.tick(started + timedelta(seconds=1))
+        organizer.tick(started + timedelta(seconds=2))
+
+        assert not final.exists()
+        assert (library / "Documents" / "download.pdf").exists()
+    finally:
+        organizer.stop()
+
+
+def test_unknown_file_needs_review_and_pause_stops_processing(tmp_path: Path) -> None:
+    organizer, incoming, _, _ = _service(tmp_path)
+    started = datetime(2026, 1, 1, tzinfo=UTC)
+    source = incoming / "unknown.format"
+    source.write_bytes(b"unknown")
+    organizer.handle_event(FileWatchEvent(WatchEventType.CREATED, source), started)
+    organizer.pause()
+    try:
+        organizer.tick(started + timedelta(seconds=5))
+        assert organizer.snapshots()[0].state is CandidateState.DETECTED
+        organizer.resume()
+        organizer.tick(started)
+        organizer.tick(started + timedelta(seconds=1))
+
+        assert source.exists()
+        assert organizer.snapshots()[0].state is CandidateState.NEEDS_REVIEW
+    finally:
+        organizer.stop()
+
+
+def test_locked_file_defers_then_moves_after_access_returns(tmp_path: Path) -> None:
+    probe = _BlockedThenAvailable()
+    organizer, incoming, library, _ = _service(tmp_path, probe)
+    started = datetime(2026, 1, 1, tzinfo=UTC)
+    source = incoming / "locked.pdf"
+    source.write_bytes(b"locked then released")
+    organizer.handle_event(FileWatchEvent(WatchEventType.CREATED, source), started)
+    try:
+        organizer.tick(started)
+        organizer.tick(started + timedelta(seconds=1))
+        assert source.exists()
+        assert organizer.snapshots()[0].state is CandidateState.WAITING_FOR_ACCESS
+
+        organizer.tick(started + timedelta(seconds=2))
+        assert not source.exists()
+        assert (library / "Documents" / "locked.pdf").exists()
+        assert probe.calls == 2
+    finally:
+        organizer.stop()
+
+
+def test_disappearing_library_defers_without_fallback_or_move(tmp_path: Path) -> None:
+    organizer, incoming, library, _ = _service(tmp_path)
+    started = datetime(2026, 1, 1, tzinfo=UTC)
+    source = incoming / "report.pdf"
+    source.write_bytes(b"safe source")
+    organizer.handle_event(FileWatchEvent(WatchEventType.CREATED, source), started)
+    try:
+        organizer.tick(started)
+        library.rmdir()
+        organizer.tick(started + timedelta(seconds=1))
+
+        assert source.read_bytes() == b"safe source"
+        assert organizer.snapshots()[0].state is CandidateState.DEFERRED
+        assert "library is unavailable" in organizer.snapshots()[0].detail
+    finally:
+        organizer.stop()
+
+
+def test_review_all_policy_never_moves_recognized_file(tmp_path: Path) -> None:
+    organizer, incoming, _, _ = _service(
+        tmp_path,
+        confidence_policy=lambda: ConfidencePolicy.REVIEW_ALL,
+    )
+    started = datetime(2026, 1, 1, tzinfo=UTC)
+    source = incoming / "report.pdf"
+    source.write_bytes(b"safe source")
+    organizer.handle_event(FileWatchEvent(WatchEventType.CREATED, source), started)
+    try:
+        organizer.tick(started)
+        organizer.tick(started + timedelta(seconds=1))
+
+        assert source.exists()
+        assert organizer.snapshots()[0].state is CandidateState.NEEDS_REVIEW
+        assert "Confidence policy requires review" in organizer.snapshots()[0].detail
+    finally:
+        organizer.stop()
+
+
+def test_pending_candidate_restores_and_existing_scan_is_opt_in(tmp_path: Path) -> None:
+    incoming = tmp_path / "incoming"
+    library = tmp_path / "library"
+    incoming.mkdir()
+    library.mkdir()
+    state = StateRepository(tmp_path / "state.db")
+    history = HistoryRepository(tmp_path / "history.jsonl")
+    suppressor = OperationSuppressor()
+    config = ReadinessConfig(
+        sample_interval_seconds=3600,
+        required_stable_samples=2,
+        minimum_quiet_seconds=1,
+    )
+    source = incoming / "pending.pdf"
+    source.write_bytes(b"pending")
+
+    first = AutomaticOrganizer(
+        MoveTransactionService(history, suppressor),
+        suppressor,
+        access_probe=_AlwaysAvailable(),
+        config=config,
+        watcher_factory=_WatcherFactory(),
+        state_repository=state,
+    )
+    first.start(incoming, library)
+    first.handle_event(
+        FileWatchEvent(WatchEventType.CREATED, source),
+        datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    first.stop()
+
+    restored = AutomaticOrganizer(
+        MoveTransactionService(history, suppressor),
+        suppressor,
+        access_probe=_AlwaysAvailable(),
+        config=config,
+        watcher_factory=_WatcherFactory(),
+        state_repository=state,
+    )
+    restored.start(incoming, library)
+    try:
+        assert [candidate.source_path for candidate in restored.snapshots()] == [source]
+        assert restored.snapshots()[0].stable_samples == 0
+    finally:
+        restored.stop()
+
+    state.save_candidates(incoming, ())
+    catch_up = AutomaticOrganizer(
+        MoveTransactionService(history, suppressor),
+        suppressor,
+        access_probe=_AlwaysAvailable(),
+        config=config,
+        watcher_factory=_WatcherFactory(),
+        state_repository=state,
+    )
+    catch_up.start(incoming, library, process_existing=True)
+    try:
+        assert [candidate.source_path for candidate in catch_up.snapshots()] == [source]
+    finally:
+        catch_up.stop()

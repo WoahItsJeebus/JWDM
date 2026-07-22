@@ -4,12 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "jwdm"
-version = "0.1.0"
+version = "0.4.0"
 description = "Jeebus' Windows Download Manager"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "PySide6==6.11.1",
+    "watchdog==6.0.0",
 ]
 
 [project.optional-dependencies]
