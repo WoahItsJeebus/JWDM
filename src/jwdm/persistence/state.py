@@ -18,12 +18,13 @@ from jwdm.config import (
     ConfidencePolicy,
     ExtensionRule,
     RuleAction,
+    VolumeBinding,
     normalize_extension,
 )
 from jwdm.pipeline.candidate import CandidateSnapshot, CandidateState
 from jwdm.services.destinations import validate_category
 
-STATE_SCHEMA_VERSION: Final = 1
+STATE_SCHEMA_VERSION: Final = 2
 
 
 class StateError(RuntimeError):
@@ -252,6 +253,61 @@ class StateRepository:
                 raise StateError(f"Cannot restore candidate queue from {self.path}: {error}") from error
         return tuple(Path(str(row[0])) for row in rows)
 
+    def volume_binding(self, role: str) -> VolumeBinding | None:
+        with self._lock:
+            try:
+                with self._connection() as connection:
+                    row = connection.execute(
+                        "SELECT volume_id, relative_path, last_mount_path, serial_number, "
+                        "filesystem, label FROM volume_bindings WHERE role = ?",
+                        (role,),
+                    ).fetchone()
+            except (OSError, sqlite3.Error) as error:
+                raise StateError(
+                    f"Cannot read volume binding from {self.path}: {error}"
+                ) from error
+        if row is None:
+            return None
+        return VolumeBinding(
+            volume_id=str(row[0]),
+            relative_path=str(row[1]),
+            last_mount_path=Path(str(row[2])),
+            serial_number=int(row[3]) if row[3] is not None else None,
+            filesystem=str(row[4]) if row[4] is not None else None,
+            label=str(row[5]) if row[5] is not None else None,
+        )
+
+    def save_volume_binding(self, role: str, binding: VolumeBinding) -> None:
+        if not role.strip():
+            raise StateError("Volume binding role cannot be empty.")
+        with self._lock:
+            try:
+                with self._connection() as connection:
+                    connection.execute(
+                        "INSERT INTO volume_bindings("
+                        "role, volume_id, relative_path, last_mount_path, serial_number, "
+                        "filesystem, label) VALUES(?, ?, ?, ?, ?, ?, ?) "
+                        "ON CONFLICT(role) DO UPDATE SET "
+                        "volume_id = excluded.volume_id, "
+                        "relative_path = excluded.relative_path, "
+                        "last_mount_path = excluded.last_mount_path, "
+                        "serial_number = excluded.serial_number, "
+                        "filesystem = excluded.filesystem, label = excluded.label",
+                        (
+                            role,
+                            binding.volume_id,
+                            binding.relative_path,
+                            str(binding.last_mount_path),
+                            binding.serial_number,
+                            binding.filesystem,
+                            binding.label,
+                        ),
+                    )
+            except (OSError, sqlite3.Error) as error:
+                raise StateError(
+                    f"Cannot save volume binding to {self.path}: {error}"
+                ) from error
+
     def _migrate(self) -> None:
         with self._lock:
             try:
@@ -294,6 +350,28 @@ class StateRepository:
                                 ON candidate_queue(incoming_identity);
                             PRAGMA user_version = 1;
                             """
+                        )
+                        version = 1
+                    if version == 1:
+                        connection.executescript(
+                            """
+                            CREATE TABLE volume_bindings(
+                                role TEXT PRIMARY KEY,
+                                volume_id TEXT NOT NULL,
+                                relative_path TEXT NOT NULL,
+                                last_mount_path TEXT NOT NULL,
+                                serial_number INTEGER,
+                                filesystem TEXT,
+                                label TEXT
+                            );
+                            PRAGMA user_version = 2;
+                            """
+                        )
+                        version = 2
+                    if version != STATE_SCHEMA_VERSION:
+                        raise StateError(
+                            f"State database migration stopped at schema {version}; "
+                            f"expected {STATE_SCHEMA_VERSION}."
                         )
             except StateError:
                 raise

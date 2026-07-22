@@ -1,4 +1,4 @@
-"""Coordinate durable Phase 3 settings, rules, startup, and close behavior."""
+"""Coordinate durable settings, destination status, startup, and close behavior."""
 
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ from PySide6.QtWidgets import QApplication, QDialog, QMessageBox
 from jwdm.config import AppSettings
 from jwdm.logging_config import APPLICATION_LOGGER
 from jwdm.persistence.state import StateError, StateRepository
+from jwdm.services.library_destination import LibraryDestinationService
 from jwdm.services.startup import StartupError, StartupManager
 from jwdm.ui.main_window import MainWindow
 from jwdm.ui.settings_dialogs import RulesDialog, SettingsDialog
@@ -29,12 +30,15 @@ class SettingsController:
         repository: StateRepository,
         startup: StartupManager,
         settings: AppSettings,
+        library_destination: LibraryDestinationService | None = None,
     ) -> None:
         self._application = application
         self._window = window
         self._repository = repository
         self._startup = startup
         self._settings = settings
+        self._library_destination = library_destination
+        self._destination_status = None
         self._tray: TrayController | None = None
         self._tray_available = False
         self._logger = logging.getLogger(f"{APPLICATION_LOGGER}.settings")
@@ -49,6 +53,12 @@ class SettingsController:
         window.close_requested.connect(self.handle_close)
         window.library_path_changed.connect(self._path_changed)
         window.incoming_path_changed.connect(self._path_changed)
+        self._destination_timer = QTimer(window)
+        self._destination_timer.setInterval(2000)
+        self._destination_timer.timeout.connect(self.refresh_destination_status)
+        if library_destination is not None and settings.library_path is not None:
+            self.refresh_destination_status()
+            self._destination_timer.start()
 
     def current(self) -> AppSettings:
         return self._settings
@@ -63,6 +73,11 @@ class SettingsController:
         self._tray = tray
         self._tray_available = available
         tray.bind_settings(self.show_settings)
+        if self._destination_status is not None:
+            tray.set_destination_status(
+                self._destination_status.available,
+                self._destination_status.detail,
+            )
 
     def show_settings(self) -> None:
         dialog = SettingsDialog(self._settings, self._window)
@@ -110,6 +125,31 @@ class SettingsController:
             extra={"event": "rules_saved", "count": len(dialog.selected_rules())},
         )
 
+    def refresh_destination_status(self) -> None:
+        if self._library_destination is None or self._settings.library_path is None:
+            return
+        try:
+            status = self._library_destination.status(self._settings.library_path)
+            if status.available and status.path != self._settings.library_path:
+                updated = replace(self._settings, library_path=status.path)
+                self._repository.save_settings(updated)
+                self._settings = updated
+                self._window.set_library_path(status.path)
+        except (OSError, StateError) as error:
+            self._logger.error(
+                "Destination status refresh failed",
+                extra={"event": "destination_status_error"},
+                exc_info=True,
+            )
+            self._window.set_destination_status(False, str(error))
+            if self._tray is not None:
+                self._tray.set_destination_status(False, str(error))
+            return
+        self._destination_status = status
+        self._window.set_destination_status(status.available, status.detail)
+        if self._tray is not None:
+            self._tray.set_destination_status(status.available, status.detail)
+
     def handle_close(self, event: object) -> None:
         if not isinstance(event, QCloseEvent):
             return
@@ -144,6 +184,36 @@ class SettingsController:
         )
         if updated == self._settings:
             return
+        if (
+            self._library_destination is not None
+            and updated.library_path is not None
+            and updated.library_path != self._settings.library_path
+        ):
+            try:
+                self._library_destination.configure(updated.library_path)
+                self._destination_status = self._library_destination.status(
+                    updated.library_path
+                )
+            except (OSError, StateError) as error:
+                QMessageBox.warning(
+                    self._window,
+                    "Library identity unavailable",
+                    f"JWDM could not bind this folder to its volume.\n\n{error}",
+                )
+                previous = self._settings.library_path
+                self._window.library_edit.setText(str(previous) if previous else "")
+                return
+            self._window.set_destination_status(
+                self._destination_status.available,
+                self._destination_status.detail,
+            )
+            if self._tray is not None:
+                self._tray.set_destination_status(
+                    self._destination_status.available,
+                    self._destination_status.detail,
+                )
+            if not self._destination_timer.isActive():
+                self._destination_timer.start()
         try:
             self._repository.save_settings(updated)
         except StateError as error:

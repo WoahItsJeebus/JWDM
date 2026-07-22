@@ -1,4 +1,4 @@
-"""Append-only move and undo history for Phase 1."""
+"""Append-only move, undo, and recovery transaction history."""
 
 from __future__ import annotations
 
@@ -26,6 +26,7 @@ class OperationStatus(StrEnum):
     UNDO_PENDING = "undo_pending"
     UNDONE = "undone"
     UNDO_FAILED = "undo_failed"
+    RECOVERY_REQUIRED = "recovery_required"
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,6 +41,17 @@ class HistoryOperation:
     collision_behavior: str
     status: OperationStatus
     planned_at: datetime
+    cross_volume: bool = False
+    temporary_path: Path | None = None
+    source_volume_id: str | None = None
+    destination_volume_id: str | None = None
+    content_hash: str | None = None
+    copy_verified: bool = False
+    source_removed: bool = False
+    undo_cross_volume: bool = False
+    undo_temporary_path: Path | None = None
+    undo_copy_verified: bool = False
+    undo_source_removed: bool = False
     completed_at: datetime | None = None
     destination_modified_ns: int | None = None
     error: str | None = None
@@ -70,6 +82,39 @@ class HistoryRepository:
                 "category": operation.category,
                 "reason": operation.reason,
                 "collision_behavior": operation.collision_behavior,
+                "cross_volume": operation.cross_volume,
+                "temporary_path": (
+                    str(operation.temporary_path)
+                    if operation.temporary_path is not None
+                    else None
+                ),
+                "source_volume_id": operation.source_volume_id,
+                "destination_volume_id": operation.destination_volume_id,
+            }
+        )
+
+    def record_copy_verified(
+        self, operation_id: str, content_hash: str, *, direction: str
+    ) -> None:
+        if direction not in {"move", "undo"}:
+            raise HistoryError(f"Unsupported copy direction: {direction}")
+        self._append(
+            {
+                "record_type": "copy_verified",
+                "operation_id": operation_id,
+                "direction": direction,
+                "content_hash": content_hash,
+            }
+        )
+
+    def record_source_removed(self, operation_id: str, *, direction: str) -> None:
+        if direction not in {"move", "undo"}:
+            raise HistoryError(f"Unsupported removal direction: {direction}")
+        self._append(
+            {
+                "record_type": "source_removed",
+                "operation_id": operation_id,
+                "direction": direction,
             }
         )
 
@@ -89,8 +134,21 @@ class HistoryRepository:
             {"record_type": "move_failed", "operation_id": operation_id, "error": error}
         )
 
-    def record_undo_intended(self, operation_id: str) -> None:
-        self._append({"record_type": "undo_intended", "operation_id": operation_id})
+    def record_undo_intended(
+        self,
+        operation_id: str,
+        *,
+        cross_volume: bool = False,
+        temporary_path: Path | None = None,
+    ) -> None:
+        self._append(
+            {
+                "record_type": "undo_intended",
+                "operation_id": operation_id,
+                "cross_volume": cross_volume,
+                "temporary_path": str(temporary_path) if temporary_path else None,
+            }
+        )
 
     def record_undo_completed(self, operation_id: str) -> None:
         self._append({"record_type": "undo_completed", "operation_id": operation_id})
@@ -98,6 +156,15 @@ class HistoryRepository:
     def record_undo_failed(self, operation_id: str, error: str) -> None:
         self._append(
             {"record_type": "undo_failed", "operation_id": operation_id, "error": error}
+        )
+
+    def record_recovery_required(self, operation_id: str, error: str) -> None:
+        self._append(
+            {
+                "record_type": "recovery_required",
+                "operation_id": operation_id,
+                "error": error,
+            }
         )
 
     def operations(self) -> tuple[HistoryOperation, ...]:
@@ -128,6 +195,16 @@ class HistoryRepository:
                     ),
                     status=OperationStatus.PENDING,
                     planned_at=occurred_at,
+                    cross_volume=self._optional_bool(
+                        event, "cross_volume", line_number, False
+                    ),
+                    temporary_path=self._optional_path(event, "temporary_path", line_number),
+                    source_volume_id=self._optional_text(
+                        event, "source_volume_id", line_number
+                    ),
+                    destination_volume_id=self._optional_text(
+                        event, "destination_volume_id", line_number
+                    ),
                 )
                 operations[operation_id] = operation
                 order.append(operation_id)
@@ -156,8 +233,45 @@ class HistoryRepository:
                 )
             elif record_type == "undo_intended":
                 operations[operation_id] = replace(
-                    operation, status=OperationStatus.UNDO_PENDING, error=None
+                    operation,
+                    status=OperationStatus.UNDO_PENDING,
+                    undo_cross_volume=self._optional_bool(
+                        event, "cross_volume", line_number, False
+                    ),
+                    undo_temporary_path=self._optional_path(
+                        event, "temporary_path", line_number
+                    ),
+                    error=None,
                 )
+            elif record_type == "copy_verified":
+                direction = self._required_text(event, "direction", line_number)
+                content_hash = self._required_text(event, "content_hash", line_number)
+                if direction == "move":
+                    operations[operation_id] = replace(
+                        operation,
+                        content_hash=content_hash,
+                        copy_verified=True,
+                    )
+                elif direction == "undo":
+                    operations[operation_id] = replace(
+                        operation,
+                        content_hash=content_hash,
+                        undo_copy_verified=True,
+                    )
+                else:
+                    raise HistoryError(
+                        f"Invalid copy direction {direction!r} on line {line_number}."
+                    )
+            elif record_type == "source_removed":
+                direction = self._required_text(event, "direction", line_number)
+                if direction == "move":
+                    operations[operation_id] = replace(operation, source_removed=True)
+                elif direction == "undo":
+                    operations[operation_id] = replace(operation, undo_source_removed=True)
+                else:
+                    raise HistoryError(
+                        f"Invalid removal direction {direction!r} on line {line_number}."
+                    )
             elif record_type == "undo_completed":
                 operations[operation_id] = replace(
                     operation, status=OperationStatus.UNDONE, error=None
@@ -166,6 +280,12 @@ class HistoryRepository:
                 operations[operation_id] = replace(
                     operation,
                     status=OperationStatus.UNDO_FAILED,
+                    error=self._required_text(event, "error", line_number),
+                )
+            elif record_type == "recovery_required":
+                operations[operation_id] = replace(
+                    operation,
+                    status=OperationStatus.RECOVERY_REQUIRED,
                     error=self._required_text(event, "error", line_number),
                 )
             else:
@@ -180,6 +300,19 @@ class HistoryRepository:
             if operation.status in {OperationStatus.COMPLETED, OperationStatus.UNDO_FAILED}:
                 return operation
         return None
+
+    def pending_operations(self) -> tuple[HistoryOperation, ...]:
+        return tuple(
+            operation
+            for operation in self.operations()
+            if operation.status in {OperationStatus.PENDING, OperationStatus.UNDO_PENDING}
+        )
+
+    def operation(self, operation_id: str) -> HistoryOperation:
+        for operation in self.operations():
+            if operation.operation_id == operation_id:
+                return operation
+        raise HistoryError(f"Unknown operation: {operation_id}")
 
     def _append(self, event: dict[str, Any]) -> None:
         payload = {
@@ -241,6 +374,33 @@ class HistoryRepository:
         return value
 
     @staticmethod
+    def _optional_text(
+        event: dict[str, Any], key: str, line_number: int
+    ) -> str | None:
+        value = event.get(key)
+        if value is None:
+            return None
+        if not isinstance(value, str) or not value:
+            raise HistoryError(f"Invalid optional text field {key!r} on line {line_number}.")
+        return value
+
+    @staticmethod
+    def _optional_path(
+        event: dict[str, Any], key: str, line_number: int
+    ) -> Path | None:
+        value = HistoryRepository._optional_text(event, key, line_number)
+        return Path(value) if value is not None else None
+
+    @staticmethod
+    def _optional_bool(
+        event: dict[str, Any], key: str, line_number: int, default: bool
+    ) -> bool:
+        value = event.get(key, default)
+        if not isinstance(value, bool):
+            raise HistoryError(f"Invalid boolean field {key!r} on line {line_number}.")
+        return value
+
+    @staticmethod
     def _parse_timestamp(event: dict[str, Any], line_number: int) -> datetime:
         value = HistoryRepository._required_text(event, "timestamp", line_number)
         try:
@@ -249,4 +409,3 @@ class HistoryRepository:
             raise HistoryError(
                 f"Invalid timestamp on operation history line {line_number}: {value}"
             ) from error
-

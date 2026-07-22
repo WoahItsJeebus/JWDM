@@ -196,7 +196,9 @@ def test_locked_file_defers_then_moves_after_access_returns(tmp_path: Path) -> N
         organizer.stop()
 
 
-def test_disappearing_library_defers_without_fallback_or_move(tmp_path: Path) -> None:
+def test_disappearing_library_queues_and_reconnect_resumes_without_fallback(
+    tmp_path: Path,
+) -> None:
     organizer, incoming, library, _ = _service(tmp_path)
     started = datetime(2026, 1, 1, tzinfo=UTC)
     source = incoming / "report.pdf"
@@ -208,8 +210,13 @@ def test_disappearing_library_defers_without_fallback_or_move(tmp_path: Path) ->
         organizer.tick(started + timedelta(seconds=1))
 
         assert source.read_bytes() == b"safe source"
-        assert organizer.snapshots()[0].state is CandidateState.DEFERRED
-        assert "library is unavailable" in organizer.snapshots()[0].detail
+        assert organizer.snapshots()[0].state is CandidateState.QUEUED_FOR_DESTINATION
+        assert "Library unavailable" in organizer.snapshots()[0].detail
+
+        library.mkdir()
+        organizer.tick(started + timedelta(seconds=2))
+        assert not source.exists()
+        assert (library / "Documents" / "report.pdf").exists()
     finally:
         organizer.stop()
 

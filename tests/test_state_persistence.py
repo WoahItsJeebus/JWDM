@@ -12,6 +12,7 @@ from jwdm.config import (
     ConfidencePolicy,
     ExtensionRule,
     RuleAction,
+    VolumeBinding,
 )
 from jwdm.persistence.state import STATE_SCHEMA_VERSION, StateError, StateRepository
 from jwdm.pipeline.candidate import CandidateState
@@ -97,3 +98,26 @@ def test_newer_state_schema_is_refused(tmp_path: Path) -> None:
 
     with pytest.raises(StateError, match="newer than"):
         StateRepository(path)
+
+
+def test_phase_three_database_migrates_volume_binding_schema(tmp_path: Path) -> None:
+    path = tmp_path / "state.db"
+    StateRepository(path)
+    with sqlite3.connect(path) as connection:
+        connection.execute("DROP TABLE volume_bindings")
+        connection.execute("PRAGMA user_version = 1")
+
+    repository = StateRepository(path)
+    binding = VolumeBinding(
+        volume_id="volume-guid",
+        relative_path=r"JWDM\Library",
+        last_mount_path=Path("E:/"),
+        serial_number=1234,
+        filesystem="NTFS",
+        label="Assets",
+    )
+    repository.save_volume_binding("library", binding)
+
+    assert repository.volume_binding("library") == binding
+    with sqlite3.connect(path) as connection:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 2

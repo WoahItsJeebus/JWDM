@@ -59,6 +59,39 @@ class PathValidator:
 
         return ValidatedPaths(normalized_roots, normalized_library)
 
+    def validate_automatic(
+        self,
+        incoming_root: Path,
+        configured_library: Path,
+        available_library: Path | None,
+    ) -> ValidatedPaths:
+        """Validate monitoring even while a previously bound library is disconnected."""
+
+        if available_library is not None:
+            return self.validate(
+                (ScanRoot(incoming_root, False),),
+                available_library,
+            )
+        normalized_incoming = self._existing_directory(incoming_root, "Incoming")
+        expanded_library = configured_library.expanduser()
+        if _is_network_path(expanded_library):
+            raise PathValidationError(
+                f"Library network paths are not supported: {configured_library}"
+            )
+        normalized_library = expanded_library.resolve(strict=False)
+        if normalized_incoming == normalized_library:
+            raise PathValidationError(
+                "The incoming folder and disconnected library path cannot be identical."
+            )
+        if _contains(normalized_library, normalized_incoming):
+            raise PathValidationError(
+                f"Incoming folder is inside the configured library: {incoming_root}"
+            )
+        return ValidatedPaths(
+            (ScanRoot(normalized_incoming, False),),
+            normalized_library,
+        )
+
     @staticmethod
     def _existing_directory(path: Path, label: str) -> Path:
         expanded = path.expanduser()

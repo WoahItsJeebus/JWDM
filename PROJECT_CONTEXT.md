@@ -1075,6 +1075,15 @@ safety observations.
 
 ### Phase 4: External library resilience
 
+**Status:** Complete as of 2026-07-22. Configured libraries are bound to a
+Windows volume GUID and relative path, with serial, filesystem, label, and last
+mount metadata retained for diagnostics. A disconnected destination is shown in
+the main window and tray, never replaced by another drive at the same letter,
+and automatic candidates remain queued at their sources until the same volume
+reconnects. Moves preflight free space; cross-volume move and undo use a durable
+SHA-256-verified copy checkpoint before source removal. Startup replays pending
+journal entries conservatively and marks ambiguous states for manual recovery.
+
 - Volume identity
 - Destination disconnect/reconnect
 - Free-space checks
@@ -1160,9 +1169,9 @@ Do not silently decide these without recording the choice:
   database while retaining this transaction journal.
 - The organized-library choice was session-only through Phase 2. Phase 3 now
   persists it in the per-user state database.
-- Phase 1 executes and undoes same-volume moves only. Cross-volume requests are
-  explicitly deferred without moving the source; verified cross-volume copy and
-  external-library resilience remain Phase 4 work.
+- Phase 1 originally executed and undid same-volume moves only. Phase 4 now
+  extends the same transaction journal and undo contract with verified
+  cross-volume copying.
 
 ### 25.3 Resolved Phase 2 decisions
 
@@ -1171,7 +1180,8 @@ Do not silently decide these without recording the choice:
   Phase 3 adds an explicit opt-in setting for closed-app catch-up.
 - The active candidate registry remains thread-safe and in memory. Phase 3
   persists pending paths across restarts and resets their readiness sampling;
-  crash recovery for pending filesystem move operations remains Phase 4 scope.
+  Phase 4 separately recovers pending filesystem move operations from the
+  append-only transaction journal.
 - The provisional readiness defaults are a 750 ms sample interval, four stable
   samples, and a minimum three-second quiet period. Size or modification-time
   changes restart sampling, and any filesystem event restarts the quiet window.
@@ -1210,6 +1220,34 @@ Do not silently decide these without recording the choice:
   prior stability/access observations and pass the full readiness pipeline
   again. Scanning other top-level files that arrived while JWDM was closed is an
   explicit opt-in setting.
+
+### 25.5 Resolved Phase 4 decisions
+
+- On Windows, a configured library is identified by its volume GUID plus its
+  path relative to the volume root. Serial number, filesystem, volume label, and
+  last mount path are persisted as supporting metadata. A reused drive letter
+  with a different volume identity is refused; network-folder behavior remains
+  an open decision.
+- Destination availability is refreshed in the main window and tray and on every
+  automatic processing tick. If the expected volume is disconnected, automatic
+  candidates enter an explicit queued-for-destination state and remain at their
+  sources. The resolved library path is updated when that same volume reconnects
+  at a different mount path.
+- Every move checks destination free space before its filesystem transaction is
+  journaled. Same-volume moves retain atomic rename behavior. Cross-volume move
+  and undo copy to a uniquely named application-owned partial file, flush the
+  copy, verify size and SHA-256 content, journal the durable verification
+  checkpoint, publish without overwrite, revalidate the source, and remove the
+  source last.
+- Startup recovery replays pending move and undo records. It may complete an
+  unambiguous verified transfer or discard only the exact recorded unverified
+  JWDM partial file while the source remains. Missing, conflicting, modified, or
+  hash-mismatched paths are never guessed at; they are retained and marked
+  `recovery_required` for manual attention.
+- The SQLite state schema is version 2 for persisted volume bindings. The
+  append-only JSON Lines transaction schema remains version 1 with optional
+  cross-volume metadata and checkpoint event types, preserving existing Phase 1
+  history compatibility.
 
 When a decision is made, update this document.
 

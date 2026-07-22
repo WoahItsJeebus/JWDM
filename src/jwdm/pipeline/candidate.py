@@ -18,6 +18,7 @@ class CandidateState(StrEnum):
     CLASSIFYING = "Classifying"
     NEEDS_REVIEW = "Needs review"
     EXCLUDED = "Excluded"
+    QUEUED_FOR_DESTINATION = "Queued for destination"
     MOVING = "Moving"
     MOVED = "Moved"
     DEFERRED = "Deferred"

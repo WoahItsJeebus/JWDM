@@ -15,12 +15,17 @@ from jwdm.persistence.state import StateError
 from jwdm.pipeline.candidate import CandidateSnapshot, CandidateState
 from jwdm.services.automatic_organizer import AutomaticOrganizer
 from jwdm.services.path_validation import PathValidationError
+from jwdm.services.volumes import DestinationStatus
 from jwdm.ui.main_window import MainWindow
 from jwdm.ui.tray import TrayController
 from jwdm.watcher.directory_watcher import WatcherError
 
 
 class _CandidateBridge(QObject):
+    changed = Signal(object)
+
+
+class _DestinationBridge(QObject):
     changed = Signal(object)
 
 
@@ -43,6 +48,9 @@ class AutomaticOrganizeController:
         self._bridge = _CandidateBridge()
         self._bridge.changed.connect(self._apply_candidates)
         self._organizer.subscribe(self._bridge.changed.emit)
+        self._destination_bridge = _DestinationBridge()
+        self._destination_bridge.changed.connect(self._apply_destination)
+        self._organizer.subscribe_destination(self._destination_bridge.changed.emit)
         self._logger = logging.getLogger(f"{APPLICATION_LOGGER}.automatic_ui")
 
         window.incoming_browse_requested.connect(self.choose_incoming)
@@ -171,3 +179,10 @@ class AutomaticOrganizeController:
                 candidate.state is CandidateState.NEEDS_REVIEW for candidate in candidates
             )
             self._tray.set_automatic_state(running, paused, pending, review)
+
+    def _apply_destination(self, status: object) -> None:
+        if not isinstance(status, DestinationStatus):
+            return
+        self._window.set_destination_status(status.available, status.detail)
+        if self._tray is not None:
+            self._tray.set_destination_status(status.available, status.detail)

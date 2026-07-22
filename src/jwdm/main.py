@@ -6,6 +6,7 @@ import logging
 import sys
 import threading
 from collections.abc import Sequence
+from dataclasses import replace
 
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication, QMessageBox
@@ -20,7 +21,8 @@ from jwdm.persistence.history import HistoryRepository
 from jwdm.persistence.state import StateError, StateRepository
 from jwdm.services.automatic_organizer import AutomaticOrganizer
 from jwdm.services.exclusions import ExclusionMatcher
-from jwdm.services.move_transaction import MoveTransactionService
+from jwdm.services.library_destination import LibraryDestinationService
+from jwdm.services.move_transaction import MoveError, MoveTransactionService
 from jwdm.services.operation_suppression import OperationSuppressor
 from jwdm.services.scan import ScanService
 from jwdm.services.startup import StartupError, StartupManager
@@ -83,7 +85,14 @@ def run(arguments: Sequence[str] | None = None) -> int:
     try:
         state = StateRepository()
         settings = state.settings()
-    except StateError as error:
+        library_destination = LibraryDestinationService(state)
+        library_destination.ensure_binding(settings.library_path)
+        if settings.library_path is not None:
+            destination_status = library_destination.status(settings.library_path)
+            if destination_status.available and destination_status.path != settings.library_path:
+                settings = replace(settings, library_path=destination_status.path)
+                state.save_settings(settings)
+    except (OSError, StateError) as error:
         logger.critical(
             "Persistent state is unavailable",
             extra={"event": "state_startup_error"},
@@ -91,8 +100,9 @@ def run(arguments: Sequence[str] | None = None) -> int:
         )
         QMessageBox.critical(
             None,
-            "JWDM state is unavailable",
-            f"JWDM could not safely open its settings database. No files were moved.\n\n{error}",
+            "JWDM state or library identity is unavailable",
+            "JWDM could not safely open its settings database or inspect the configured "
+            f"library volume. No files were moved.\n\n{error}",
         )
         return 1
 
@@ -104,6 +114,7 @@ def run(arguments: Sequence[str] | None = None) -> int:
         state,
         startup,
         settings,
+        library_destination,
     )
     try:
         settings_controller.synchronize_startup()
@@ -117,7 +128,25 @@ def run(arguments: Sequence[str] | None = None) -> int:
 
     history = HistoryRepository()
     suppressor = OperationSuppressor()
-    moves = MoveTransactionService(history, suppressor)
+    moves = MoveTransactionService(history, suppressor, library_destination.volumes)
+    try:
+        recovery_results = moves.recover_pending()
+    except MoveError as error:
+        logger.error(
+            "Pending operation recovery could not start",
+            extra={"event": "operation_recovery_start_error"},
+            exc_info=True,
+        )
+        QMessageBox.warning(main_window, "Operation recovery", str(error))
+    else:
+        unresolved = tuple(result for result in recovery_results if not result.succeeded)
+        if unresolved:
+            QMessageBox.warning(
+                main_window,
+                "Operation recovery needs attention",
+                "One or more interrupted operations were left in a safe but unresolved "
+                "state. Review History before changing those files.",
+            )
     classifier = RuleClassifier(state)
     exclusions = ExclusionMatcher(
         lambda: settings_controller.current().exclusions
@@ -135,6 +164,7 @@ def run(arguments: Sequence[str] | None = None) -> int:
         exclusions=exclusions,
         state_repository=state,
         confidence_policy=lambda: settings_controller.current().confidence_policy,
+        destination_resolver=library_destination.status,
     )
     automatic_controller = AutomaticOrganizeController(
         main_window,

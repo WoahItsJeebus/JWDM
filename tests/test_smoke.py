@@ -26,7 +26,7 @@ def application() -> QApplication:
 
 
 def test_package_has_version() -> None:
-    assert __version__ == "0.4.0"
+    assert __version__ == "0.5.0"
 
 
 def test_main_window_and_tray_shell(application: QApplication) -> None:
@@ -51,6 +51,7 @@ def test_main_window_and_tray_shell(application: QApplication) -> None:
     assert tray.pause_action.isEnabled()
     assert not tray.resume_action.isEnabled()
     assert tray.counts_action.text() == "Pending: 2 • Review: 1"
+    assert tray.destination_action.text() == "Destination: not configured"
     assert tray.settings_action.text() == "Settings"
     assert tray.exit_action.text() == "Exit"
 

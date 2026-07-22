@@ -71,6 +71,8 @@ class MainWindow(QMainWindow):
         library_row = QHBoxLayout()
         library_row.addWidget(self.library_edit, stretch=1)
         library_row.addWidget(self.browse_library_button)
+        self.destination_status_label = QLabel("Destination: not configured")
+        self.destination_status_label.setObjectName("destinationStatus")
 
         self.organize_button = QPushButton("Organize folders…")
         self.organize_button.setObjectName("organizeButton")
@@ -176,6 +178,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(subtitle)
         layout.addWidget(library_label)
         layout.addLayout(library_row)
+        layout.addWidget(self.destination_status_label)
         layout.addWidget(manual_group)
         layout.addWidget(automatic_group)
         layout.addWidget(QLabel("Recent activity"))
@@ -219,6 +222,10 @@ class MainWindow(QMainWindow):
 
     def set_recent_activity(self, message: str) -> None:
         self.activity_label.setText(message)
+
+    def set_destination_status(self, available: bool, detail: str) -> None:
+        prefix = "Destination available" if available else "Destination unavailable"
+        self.destination_status_label.setText(f"{prefix} — {detail}")
 
     def set_undo_available(self, available: bool) -> None:
         self.undo_button.setEnabled(available)

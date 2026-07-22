@@ -51,6 +51,18 @@ class AppSettings:
     exclusions: tuple[Path, ...] = ()
 
 
+@dataclass(frozen=True, slots=True)
+class VolumeBinding:
+    """Persist a folder's identity independently from its current drive letter."""
+
+    volume_id: str
+    relative_path: str
+    last_mount_path: Path
+    serial_number: int | None = None
+    filesystem: str | None = None
+    label: str | None = None
+
+
 _EXTENSION_PATTERN = re.compile(r"^\.[a-z0-9][a-z0-9._+-]{0,31}$")
 
 

@@ -45,6 +45,8 @@ class TrayController:
         self.resume_action.setEnabled(False)
         self.counts_action = self.menu.addAction("Pending: 0 • Review: 0")
         self.counts_action.setEnabled(False)
+        self.destination_action = self.menu.addAction("Destination: not configured")
+        self.destination_action.setEnabled(False)
         self.settings_action = self.menu.addAction("Settings")
         self.settings_action.setEnabled(False)
         self.menu.addSeparator()
@@ -85,6 +87,10 @@ class TrayController:
         self.pause_action.setEnabled(running and not paused)
         self.resume_action.setEnabled(running and paused)
         self.counts_action.setText(f"Pending: {pending} • Review: {review}")
+
+    def set_destination_status(self, available: bool, detail: str) -> None:
+        state = "available" if available else "unavailable"
+        self.destination_action.setText(f"Destination {state}: {detail}")
 
     def show(self) -> bool:
         """Show the tray icon when the current desktop supports one."""

@@ -20,7 +20,6 @@ from jwdm.pipeline.models import (
     ClassificationDisposition,
     PlanItem,
     PlanItemStatus,
-    ScanRoot,
 )
 from jwdm.pipeline.result import StageOutcome
 from jwdm.pipeline.stages.access import AccessProbe, WindowsAccessProbe
@@ -32,6 +31,7 @@ from jwdm.services.exclusions import ExclusionMatcher
 from jwdm.services.move_transaction import MoveTransactionService
 from jwdm.services.operation_suppression import OperationSuppressor
 from jwdm.services.path_validation import PathValidator
+from jwdm.services.volumes import DestinationStatus, VolumeService
 from jwdm.watcher.directory_watcher import DirectoryWatcher, WatcherError
 from jwdm.watcher.events import FileWatchEvent, WatchEventType
 
@@ -45,6 +45,7 @@ WatcherFactory = Callable[
     [Path, Callable[[FileWatchEvent], None], OperationSuppressor], Watcher
 ]
 CandidateCallback = Callable[[tuple[CandidateSnapshot, ...]], None]
+DestinationCallback = Callable[[DestinationStatus], None]
 
 
 def _is_link_or_junction(path: Path) -> bool:
@@ -68,6 +69,7 @@ class AutomaticOrganizer:
         exclusions: ExclusionMatcher | None = None,
         state_repository: StateRepository | None = None,
         confidence_policy: Callable[[], ConfidencePolicy] | None = None,
+        destination_resolver: Callable[[Path], DestinationStatus] | None = None,
     ) -> None:
         self._moves = moves
         self._suppressor = suppressor
@@ -83,14 +85,20 @@ class AutomaticOrganizer:
         self._confidence_policy = confidence_policy or (
             lambda: ConfidencePolicy.MOVE_RECOGNIZED
         )
+        default_volumes = VolumeService()
+        self._destination_resolver = destination_resolver or (
+            lambda path: default_volumes.resolve(path, None)
+        )
         self._validator = PathValidator()
         self._callbacks: list[CandidateCallback] = []
+        self._destination_callbacks: list[DestinationCallback] = []
         self._state_lock = threading.RLock()
         self._stop_event = threading.Event()
         self._worker: threading.Thread | None = None
         self._watcher: Watcher | None = None
         self._incoming_root: Path | None = None
         self._library_root: Path | None = None
+        self._destination_status: DestinationStatus | None = None
         self._running = False
         self._paused = False
         self._logger = logging.getLogger(f"{APPLICATION_LOGGER}.automatic")
@@ -113,6 +121,9 @@ class AutomaticOrganizer:
     def subscribe(self, callback: CandidateCallback) -> None:
         self._callbacks.append(callback)
 
+    def subscribe_destination(self, callback: DestinationCallback) -> None:
+        self._destination_callbacks.append(callback)
+
     def snapshots(self) -> tuple[CandidateSnapshot, ...]:
         return self._registry.snapshots()
 
@@ -126,9 +137,14 @@ class AutomaticOrganizer:
         with self._state_lock:
             if self._running:
                 raise RuntimeError("Automatic organization is already running.")
-        validated = self._validator.validate((ScanRoot(incoming_root, False),), library_root)
+        destination_status = self._destination_resolver(library_root)
+        validated = self._validator.validate_automatic(
+            incoming_root,
+            library_root,
+            destination_status.path if destination_status.available else None,
+        )
         normalized_incoming = validated.roots[0].path
-        normalized_library = validated.library_root
+        configured_library = library_root.expanduser().resolve(strict=False)
 
         watcher = self._watcher_factory(normalized_incoming, self.handle_event, self._suppressor)
         self._registry.clear()
@@ -140,7 +156,8 @@ class AutomaticOrganizer:
         )
         with self._state_lock:
             self._incoming_root = normalized_incoming
-            self._library_root = normalized_library
+            self._library_root = configured_library
+            self._destination_status = destination_status
             self._watcher = watcher
             self._worker = worker
             self._paused = False
@@ -172,9 +189,10 @@ class AutomaticOrganizer:
             extra={
                 "event": "automatic_started",
                 "source": str(normalized_incoming),
-                "destination": str(normalized_library),
+                "destination": str(destination_status.path),
             },
         )
+        self._publish_destination(destination_status)
         self._publish()
 
     def stop(self) -> None:
@@ -273,9 +291,31 @@ class AutomaticOrganizer:
             library_root = self._library_root
         if library_root is None:
             return
+        destination_status = self._destination_resolver(library_root)
+        with self._state_lock:
+            self._destination_status = destination_status
+        self._publish_destination(destination_status)
+        if not destination_status.available:
+            for candidate in self._registry.snapshots():
+                if candidate.state not in {
+                    CandidateState.MOVED,
+                    CandidateState.FAILED,
+                    CandidateState.EXCLUDED,
+                    CandidateState.NEEDS_REVIEW,
+                }:
+                    self._registry.transition(
+                        candidate.candidate_id,
+                        CandidateState.QUEUED_FOR_DESTINATION,
+                        destination_status.detail,
+                        category=candidate.proposed_category,
+                        destination=candidate.proposed_destination,
+                        confidence=candidate.confidence,
+                    )
+            self._publish()
+            return
         observed_at = now or datetime.now(UTC)
         for candidate in self._registry.snapshots():
-            self._process(candidate, library_root, observed_at)
+            self._process(candidate, destination_status.path, observed_at)
         self._publish()
 
     def _run(self) -> None:
@@ -522,6 +562,16 @@ class AutomaticOrganizer:
                 self._logger.exception(
                     "Candidate subscriber failed",
                     extra={"event": "candidate_subscriber_error"},
+                )
+
+    def _publish_destination(self, status: DestinationStatus) -> None:
+        for callback in tuple(self._destination_callbacks):
+            try:
+                callback(status)
+            except Exception:
+                self._logger.exception(
+                    "Destination subscriber failed",
+                    extra={"event": "destination_subscriber_error"},
                 )
 
     def _restore_candidates(self, incoming_root: Path, process_existing: bool) -> None:

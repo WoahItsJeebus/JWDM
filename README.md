@@ -5,14 +5,13 @@ transparent organization of downloaded files.
 
 ## Current scope
 
-The repository is currently at **Phase 3**. JWDM includes the complete manual
-and automatic Phase 2 workflows plus persistent paths and preferences, editable
-extension rules, exclusions, confidence policy, per-user Windows startup,
-configurable close-to-tray behavior, schema migrations, and restart-safe pending
-candidate paths.
+The repository is currently at **Phase 4**. JWDM includes the complete manual,
+automatic, rules, and settings workflows plus volume-bound organized libraries,
+disconnect/reconnect status, free-space preflight, verified cross-volume moves,
+and conservative recovery of interrupted filesystem transactions.
 
-External-drive resilience, verified cross-volume moves, and pending move-operation
-recovery remain intentionally deferred to Phase 4.
+Smarter archive, image-metadata, and texture classification remain intentionally
+deferred to Phase 5.
 
 ## Manual organization
 
@@ -25,8 +24,9 @@ recovery remain intentionally deferred to Phase 4.
    unchanged file when its original path is still free.
 
 Selected source folders are never registered for automatic monitoring. Managed
-library subfolders are excluded from organize-in-place scans. Phase 1 refuses
-cross-volume moves; verified cross-volume copying belongs to Phase 4.
+library subfolders are excluded from organize-in-place scans. Cross-volume moves
+copy to an application-owned temporary file, verify SHA-256 content, publish the
+destination, and only then remove the unchanged source.
 
 ## Automatic organization
 
@@ -40,6 +40,9 @@ cross-volume moves; verified cross-volume copying belongs to Phase 4.
    **Needs review**.
 5. Pause or resume processing from either the main window or tray. Pending paths
    survive restart, but readiness sampling restarts from zero for safety.
+6. If the bound library volume disconnects, candidates remain queued at their
+   sources. Processing resumes only when the same volume identity reconnects,
+   including at a different drive letter.
 
 ## Rules and settings
 
@@ -91,7 +94,7 @@ After the first build has created the environment:
 ```
 
 Runtime logs use JSON Lines format at `%LOCALAPPDATA%\JWDM\logs\jwdm.log.jsonl`.
-The append-only move/undo journal is stored at
-`%LOCALAPPDATA%\JWDM\history.jsonl`. Phase 3 settings, rules, exclusions, and
-pending candidate paths are stored separately in
-`%LOCALAPPDATA%\JWDM\state.db`.
+The append-only move/undo and recovery journal is stored at
+`%LOCALAPPDATA%\JWDM\history.jsonl`. Settings, rules, exclusions, pending
+candidate paths, and the organized-library volume binding are stored separately
+in `%LOCALAPPDATA%\JWDM\state.db`.
