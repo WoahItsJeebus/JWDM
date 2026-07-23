@@ -12,10 +12,12 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QLayout,
     QLineEdit,
     QMainWindow,
     QProgressBar,
     QPushButton,
+    QSizePolicy,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -25,6 +27,7 @@ from PySide6.QtWidgets import (
 from jwdm import __version__
 from jwdm.pipeline.candidate import CandidateSnapshot, CandidateState
 from jwdm.ui.icons import build_application_icon
+from jwdm.ui.smooth_scroll import SmoothScrollArea
 
 
 class MainWindow(QMainWindow):
@@ -195,12 +198,14 @@ class MainWindow(QMainWindow):
             "after stability and exclusive-access checks. Unrecognized items follow the "
             "Unknown-folder policy in Settings."
         )
+        scope_note.setObjectName("automaticScopeNote")
         scope_note.setAlignment(Qt.AlignmentFlag.AlignCenter)
         scope_note.setWordWrap(True)
 
         layout = QVBoxLayout()
         layout.setContentsMargins(38, 24, 38, 30)
         layout.setSpacing(12)
+        layout.setSizeConstraint(QLayout.SizeConstraint.SetMinimumSize)
         layout.addWidget(title)
         layout.addWidget(subtitle)
         layout.addLayout(primary_actions)
@@ -214,8 +219,25 @@ class MainWindow(QMainWindow):
         layout.addWidget(scope_note)
 
         content = QWidget()
+        content.setObjectName("mainContent")
+        content.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.MinimumExpanding,
+        )
         content.setLayout(layout)
-        self.setCentralWidget(content)
+
+        self.content_scroll = SmoothScrollArea()
+        self.content_scroll.setObjectName("mainContentScroll")
+        self.content_scroll.setWidgetResizable(True)
+        self.content_scroll.setFrameShape(SmoothScrollArea.Shape.NoFrame)
+        self.content_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self.content_scroll.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        )
+        self.content_scroll.setWidget(content)
+        self.setCentralWidget(self.content_scroll)
 
         self.version_label = QLabel(f"v{__version__}")
         self.version_label.setObjectName("versionLabel")

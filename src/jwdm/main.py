@@ -208,6 +208,9 @@ def run(arguments: Sequence[str] | None = None) -> int:
         confidence_policy=lambda: settings_controller.current().confidence_policy,
         destination_resolver=library_destination.status,
     )
+    settings_controller.subscribe_rules_changed(
+        automatic_service.retry_reviews_for_extensions
+    )
     automatic_controller = AutomaticOrganizeController(
         main_window,
         automatic_service,

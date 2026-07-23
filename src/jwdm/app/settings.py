@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 
@@ -32,6 +33,9 @@ from jwdm.ui.settings_dialogs import (
 from jwdm.ui.tray import TrayController
 
 
+RuleChangeCallback = Callable[[tuple[str, ...]], None]
+
+
 class SettingsController:
     """Keep persistence and operating-system changes outside Qt widgets."""
 
@@ -55,6 +59,7 @@ class SettingsController:
         self._destination_status = None
         self._tray: TrayController | None = None
         self._tray_available = False
+        self._rule_change_callbacks: list[RuleChangeCallback] = []
         self._logger = logging.getLogger(f"{APPLICATION_LOGGER}.settings")
 
         if settings.library_path is not None:
@@ -76,6 +81,11 @@ class SettingsController:
 
     def current(self) -> AppSettings:
         return self._settings
+
+    def subscribe_rules_changed(self, callback: RuleChangeCallback) -> None:
+        """Notify a service after persisted extension rules materially change."""
+
+        self._rule_change_callbacks.append(callback)
 
     def synchronize_startup(self) -> None:
         self._startup.synchronize(
@@ -355,15 +365,18 @@ class SettingsController:
         dialog = RulesDialog(existing, self._window)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
+        selected = dialog.selected_rules()
+        changed_extensions = self._changed_rule_extensions(existing, selected)
         try:
-            self._repository.replace_rules(dialog.selected_rules())
+            self._repository.replace_rules(selected)
         except StateError as error:
             QMessageBox.critical(self._window, "Rules were not saved", str(error))
             return
         self._logger.info(
             "User extension rules saved",
-            extra={"event": "rules_saved", "count": len(dialog.selected_rules())},
+            extra={"event": "rules_saved", "count": len(selected)},
         )
+        self._notify_rules_changed(changed_extensions)
 
     def add_rule_for_path(self, path: Path) -> bool:
         """Open the Rules > Add editor prefilled from one reviewed candidate."""
@@ -404,7 +417,51 @@ class SettingsController:
             "Candidate quick rule saved",
             extra={"event": "candidate_rule_saved", "extension": extension},
         )
+        self._notify_rules_changed((extension,))
         return True
+
+    @staticmethod
+    def _changed_rule_extensions(
+        existing: tuple[ExtensionRule, ...],
+        selected: tuple[ExtensionRule, ...],
+    ) -> tuple[str, ...]:
+        def comparable(
+            rules: tuple[ExtensionRule, ...],
+        ) -> dict[str, tuple[RuleAction, str | None, bool, int]]:
+            return {
+                rule.extension.casefold(): (
+                    rule.action,
+                    rule.category,
+                    rule.enabled,
+                    rule.priority,
+                )
+                for rule in rules
+            }
+
+        before = comparable(existing)
+        after = comparable(selected)
+        return tuple(
+            sorted(
+                extension
+                for extension in before.keys() | after.keys()
+                if before.get(extension) != after.get(extension)
+            )
+        )
+
+    def _notify_rules_changed(self, extensions: tuple[str, ...]) -> None:
+        if not extensions:
+            return
+        for callback in tuple(self._rule_change_callbacks):
+            try:
+                callback(extensions)
+            except Exception:
+                self._logger.exception(
+                    "Automatic candidates could not be refreshed after a rule change",
+                    extra={
+                        "event": "rule_change_subscriber_error",
+                        "extensions": ";".join(extensions),
+                    },
+                )
 
     def refresh_destination_status(self) -> None:
         if self._library_destination is None or self._settings.library_path is None:

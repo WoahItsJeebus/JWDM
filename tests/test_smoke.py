@@ -8,7 +8,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
-from PySide6.QtGui import QPalette
+from PySide6.QtCore import QAbstractAnimation, QPoint, QPointF, Qt
+from PySide6.QtGui import QPalette, QWheelEvent
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import (
     QApplication,
     QGroupBox,
@@ -16,6 +18,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QProgressBar,
     QPushButton,
+    QScrollArea,
 )
 
 from jwdm import __version__
@@ -29,6 +32,7 @@ from jwdm.ui.main_window import MainWindow
 from jwdm.ui.candidate_dialogs import CandidateReviewDialog
 from jwdm.ui.manual_dialogs import CategoryCorrectionDialog, ReviewDialog
 from jwdm.ui.settings_dialogs import DownloadsRelocationDialog, SettingsDialog
+from jwdm.ui.smooth_scroll import SmoothScrollArea
 from jwdm.ui.tray import TrayController
 
 
@@ -151,6 +155,65 @@ def test_main_window_prioritizes_candidate_list_and_double_click_review(
     window.set_candidates((moved,))
     assert window.candidate_table.rowCount() == 0
     assert window.candidate_counts_label.text().startswith("Pending: 0")
+    window.close()
+
+
+def test_main_window_scrolls_instead_of_clipping_candidate_table(
+    application: QApplication,
+) -> None:
+    window = MainWindow()
+    window.resize(window.minimumWidth(), window.minimumHeight())
+    window.show()
+    application.processEvents()
+
+    scroll = window.findChild(QScrollArea, "mainContentScroll")
+    scope_note = window.findChild(QLabel, "automaticScopeNote")
+    assert scroll is not None
+    assert scope_note is not None
+    assert scroll.verticalScrollBar().maximum() > 0
+    assert window.candidate_table.height() >= window.candidate_table.minimumHeight()
+
+    scroll.verticalScrollBar().setValue(scroll.verticalScrollBar().maximum())
+    application.processEvents()
+    note_top = scope_note.mapTo(scroll.viewport(), scope_note.rect().topLeft()).y()
+    assert 0 <= note_top < scroll.viewport().height()
+    window.close()
+
+
+def test_main_window_mouse_wheel_scroll_is_animated(
+    application: QApplication,
+) -> None:
+    window = MainWindow()
+    window.resize(window.minimumWidth(), window.minimumHeight())
+    window.show()
+    application.processEvents()
+
+    scroll = window.findChild(SmoothScrollArea, "mainContentScroll")
+    assert scroll is not None
+    scroll_bar = scroll.verticalScrollBar()
+    scroll_bar.setValue(scroll_bar.minimum())
+    wheel = QWheelEvent(
+        QPointF(10, 10),
+        QPointF(10, 10),
+        QPoint(),
+        QPoint(0, -120),
+        Qt.MouseButton.NoButton,
+        Qt.KeyboardModifier.NoModifier,
+        Qt.ScrollPhase.ScrollUpdate,
+        False,
+    )
+
+    scroll.wheelEvent(wheel)
+
+    assert wheel.isAccepted()
+    assert (
+        scroll._wheel_animation.state()
+        is QAbstractAnimation.State.Running
+    )
+    target = int(scroll._wheel_animation.endValue())
+    assert target > scroll_bar.minimum()
+    QTest.qWait(scroll.WHEEL_ANIMATION_DURATION_MS + 40)
+    assert scroll_bar.value() == target
     window.close()
 
 

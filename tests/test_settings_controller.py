@@ -192,6 +192,8 @@ def test_candidate_quick_add_opens_prefilled_rule_and_persists_it(
         _Startup(),
         settings,
     )
+    changed_extensions: list[tuple[str, ...]] = []
+    controller.subscribe_rules_changed(changed_extensions.append)
 
     class _RuleEditor:
         def __init__(self, seed: ExtensionRule, parent: object) -> None:
@@ -213,4 +215,49 @@ def test_candidate_quick_add_opens_prefilled_rule_and_persists_it(
     assert controller.add_rule_for_path(tmp_path / "download.widget")
     assert repository.rules()[0].extension == ".widget"
     assert repository.rules()[0].category == "Custom/Widgets"
+    assert changed_extensions == [(".widget",)]
+    window.deleteLater()
+
+
+def test_rules_editor_notifies_candidates_for_each_changed_extension(
+    application: QApplication,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = StateRepository(tmp_path / "state.db")
+    existing = ExtensionRule(".pdf", RuleAction.ROUTE, "Documents")
+    repository.upsert_rules((existing,))
+    settings = AppSettings()
+    window = MainWindow()
+    controller = SettingsController(
+        application,
+        window,
+        repository,
+        _Startup(),
+        settings,
+    )
+    changed_extensions: list[tuple[str, ...]] = []
+    controller.subscribe_rules_changed(changed_extensions.append)
+
+    class _RulesEditor:
+        def __init__(
+            self, rules: tuple[ExtensionRule, ...], parent: object
+        ) -> None:
+            assert tuple(rule.extension for rule in rules) == (".pdf",)
+
+        def exec(self) -> QDialog.DialogCode:
+            return QDialog.DialogCode.Accepted
+
+        def selected_rules(self) -> tuple[ExtensionRule, ...]:
+            return (
+                ExtensionRule(".pdf", RuleAction.ROUTE, "Documents"),
+                ExtensionRule(".ahk", RuleAction.ROUTE, "Code/AutoHotkey"),
+            )
+
+    monkeypatch.setattr("jwdm.app.settings.RulesDialog", _RulesEditor)
+
+    controller.show_rules()
+
+    assert {rule.extension for rule in repository.rules()} == {".ahk", ".pdf"}
+    assert changed_extensions == [(".ahk",)]
     window.deleteLater()

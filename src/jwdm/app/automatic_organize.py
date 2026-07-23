@@ -143,8 +143,7 @@ class AutomaticOrganizeController:
     def quick_add_rule(self, candidate: object) -> None:
         if not isinstance(candidate, CandidateSnapshot) or self._rule_editor is None:
             return
-        if self._rule_editor(candidate.source_path):
-            self._organizer.retry_review(candidate.candidate_id)
+        self._rule_editor(candidate.source_path)
 
     def stop(self) -> None:
         try:

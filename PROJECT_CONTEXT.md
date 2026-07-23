@@ -1381,8 +1381,15 @@ Do not silently decide these without recording the choice:
   version-1 JSONL journal preserves backward compatibility.
 - Completed automatic candidates are operational history, not pending work, so
   they no longer occupy the active candidate table. Review and failed candidates
-  remain visible. Rule corrections always restart readiness rather than moving
-  directly from a stale review observation.
+  remain visible. Saving a quick-add rule or the full Rules editor immediately
+  requeues every reviewed candidate whose filename matches each changed extension.
+  Rule corrections always restart readiness rather than moving directly from a
+  stale review observation.
+- The main-window content uses one vertical scroll viewport when available height
+  cannot fit the complete layout. The automatic candidate table keeps its useful
+  minimum height instead of collapsing, while taller windows continue giving it
+  the remaining vertical space. Discrete mouse-wheel input uses a short easing
+  animation; high-resolution touchpad pixel input retains Qt's native behavior.
 - `.rbxm`, `.rbxl`, `.rbxmx`, and `.rbxlx` route to `Roblox`; `.tipa` routes to
   `Installers/TrollStore`; `.ct` routes to `Cheat Engine/Tables`; and the broader
   conservative extension map covers additional common image, audio, video,

@@ -139,13 +139,47 @@ class AutomaticOrganizer:
     def snapshot(self, candidate_id: str) -> CandidateSnapshot | None:
         return self._registry.get(candidate_id)
 
-    def retry_review(self, candidate_id: str) -> None:
-        if self._registry.reset_for_review_retry(candidate_id, datetime.now(UTC)) is not None:
+    def retry_reviews_for_extensions(
+        self,
+        extensions: tuple[str, ...],
+        occurred_at: datetime | None = None,
+    ) -> int:
+        """Requeue every reviewed file matched by a changed extension rule."""
+
+        normalized = tuple(
+            sorted(
+                {
+                    extension.casefold()
+                    for extension in extensions
+                    if extension.startswith(".") and len(extension) > 1
+                }
+            )
+        )
+        if not normalized:
+            return 0
+        timestamp = occurred_at or datetime.now(UTC)
+        retried: list[CandidateSnapshot] = []
+        for candidate in self._registry.snapshots():
+            if (
+                candidate.state is CandidateState.NEEDS_REVIEW
+                and candidate.source_path.name.casefold().endswith(normalized)
+            ):
+                reset = self._registry.reset_for_review_retry(
+                    candidate.candidate_id, timestamp
+                )
+                if reset is not None:
+                    retried.append(reset)
+        if retried:
             self._logger.info(
-                "Candidate review restarted after rule change",
-                extra={"event": "candidate_review_retried", "candidate_id": candidate_id},
+                "Candidate reviews restarted after rule change",
+                extra={
+                    "event": "candidate_reviews_retried",
+                    "count": len(retried),
+                    "extensions": ";".join(normalized),
+                },
             )
             self._publish()
+        return len(retried)
 
     def start(
         self,

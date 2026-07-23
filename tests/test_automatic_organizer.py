@@ -4,10 +4,11 @@ import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from jwdm.config import ConfidencePolicy
+from jwdm.classification.rule_classifier import RuleClassifier
+from jwdm.config import ConfidencePolicy, ExtensionRule, RuleAction
 from jwdm.persistence.history import HistoryRepository
 from jwdm.persistence.state import StateRepository
-from jwdm.pipeline.candidate import CandidateState
+from jwdm.pipeline.candidate import CandidateSnapshot, CandidateState
 from jwdm.pipeline.result import StageOutcome, StageResult
 from jwdm.pipeline.stages.access import AccessProbe
 from jwdm.pipeline.stages.stability import ReadinessConfig
@@ -183,6 +184,93 @@ def test_unknown_file_needs_review_and_pause_stops_processing(tmp_path: Path) ->
 
         assert source.exists()
         assert organizer.snapshots()[0].state is CandidateState.NEEDS_REVIEW
+    finally:
+        organizer.stop()
+
+
+def test_new_rule_requeues_and_moves_all_matching_review_candidates(
+    tmp_path: Path,
+) -> None:
+    incoming = tmp_path / "incoming"
+    library = tmp_path / "library"
+    incoming.mkdir()
+    library.mkdir()
+    state = StateRepository(tmp_path / "state.db")
+    history = HistoryRepository(tmp_path / "history.jsonl")
+    suppressor = OperationSuppressor()
+    organizer = AutomaticOrganizer(
+        MoveTransactionService(history, suppressor),
+        suppressor,
+        classifier=RuleClassifier(state),
+        access_probe=_AlwaysAvailable(),
+        config=ReadinessConfig(
+            sample_interval_seconds=3600,
+            required_stable_samples=2,
+            minimum_quiet_seconds=1,
+        ),
+        watcher_factory=_WatcherFactory(),
+    )
+    organizer.start(incoming, library)
+    published: list[tuple[CandidateSnapshot, ...]] = []
+    organizer.subscribe(published.append)
+    started = datetime(2026, 1, 1, tzinfo=UTC)
+    first = incoming / "first.ahk"
+    second = incoming / "second.AHK"
+    unrelated = incoming / "other.widget"
+    for source in (first, second, unrelated):
+        source.write_bytes(b"reviewed")
+        organizer.handle_event(FileWatchEvent(WatchEventType.CREATED, source), started)
+    try:
+        organizer.tick(started)
+        organizer.tick(started + timedelta(seconds=1))
+        assert all(
+            candidate.state is CandidateState.NEEDS_REVIEW
+            for candidate in organizer.snapshots()
+        )
+
+        state.upsert_rules(
+            (
+                ExtensionRule(
+                    ".ahk",
+                    RuleAction.ROUTE,
+                    "Code/AutoHotkey",
+                ),
+            )
+        )
+        retried = organizer.retry_reviews_for_extensions(
+            (".ahk",),
+            occurred_at=started + timedelta(seconds=2),
+        )
+
+        restarted = {
+            candidate.source_path.name: candidate
+            for candidate in organizer.snapshots()
+        }
+        assert retried == 2
+        assert restarted["first.ahk"].state is CandidateState.DETECTED
+        assert restarted["second.AHK"].state is CandidateState.DETECTED
+        assert restarted["first.ahk"].stable_samples == 0
+        assert restarted["other.widget"].state is CandidateState.NEEDS_REVIEW
+        assert published
+        assert sum(
+            candidate.state is CandidateState.DETECTED
+            for candidate in published[-1]
+        ) == 2
+
+        organizer.tick(started + timedelta(seconds=2))
+        organizer.tick(started + timedelta(seconds=3))
+
+        assert not first.exists()
+        assert not second.exists()
+        assert (library / "Code" / "AutoHotkey" / "first.ahk").exists()
+        assert (library / "Code" / "AutoHotkey" / "second.AHK").exists()
+        remaining = {
+            candidate.source_path.name: candidate
+            for candidate in organizer.snapshots()
+        }
+        assert remaining["first.ahk"].state is CandidateState.MOVED
+        assert remaining["second.AHK"].state is CandidateState.MOVED
+        assert remaining["other.widget"].state is CandidateState.NEEDS_REVIEW
     finally:
         organizer.stop()
 
