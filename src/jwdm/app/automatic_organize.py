@@ -1,4 +1,4 @@
-"""Qt coordination for the Phase 2 automatic organizer."""
+"""Qt coordination for automatic organizer controls and candidate review."""
 
 from __future__ import annotations
 
@@ -17,6 +17,7 @@ from jwdm.services.automatic_organizer import AutomaticOrganizer
 from jwdm.services.path_validation import PathValidationError
 from jwdm.services.volumes import DestinationStatus
 from jwdm.ui.main_window import MainWindow
+from jwdm.ui.candidate_dialogs import CandidateReviewDialog
 from jwdm.ui.tray import TrayController
 from jwdm.watcher.directory_watcher import WatcherError
 
@@ -38,11 +39,13 @@ class AutomaticOrganizeController:
         organizer: AutomaticOrganizer,
         history_refresh: Callable[[], None],
         settings_provider: Callable[[], AppSettings] | None = None,
+        rule_editor: Callable[[Path], bool] | None = None,
     ) -> None:
         self._window = window
         self._organizer = organizer
         self._history_refresh = history_refresh
         self._settings_provider = settings_provider or AppSettings
+        self._rule_editor = rule_editor
         self._tray: TrayController | None = None
         self._known_moved: set[str] = set()
         self._bridge = _CandidateBridge()
@@ -56,6 +59,8 @@ class AutomaticOrganizeController:
         window.incoming_browse_requested.connect(self.choose_incoming)
         window.automatic_toggle_requested.connect(self.toggle_running)
         window.automatic_pause_requested.connect(self.toggle_paused)
+        window.candidate_review_requested.connect(self.review_candidate)
+        window.candidate_rule_requested.connect(self.quick_add_rule)
         self._apply_candidates(())
 
     def set_tray(self, tray: TrayController) -> None:
@@ -71,21 +76,27 @@ class AutomaticOrganizeController:
             self._window, "Choose incoming folder", initial
         )
         if selected:
-            self._window.set_incoming_path(Path(selected))
+            selected_path = Path(selected)
+            paths = self._window.incoming_paths
+            if not any(
+                path.resolve(strict=False) == selected_path.resolve(strict=False)
+                for path in paths
+            ):
+                self._window.set_incoming_paths((*paths, selected_path))
 
     def toggle_running(self) -> None:
         if self._organizer.is_running:
             self.stop()
             return
-        incoming = self._window.incoming_path
+        incoming = self._window.incoming_paths
         library = self._window.library_path
-        if incoming is None:
+        if not incoming:
             self.choose_incoming()
-            incoming = self._window.incoming_path
+            incoming = self._window.incoming_paths
         if library is None:
             self._window.library_browse_requested.emit()
             library = self._window.library_path
-        if incoming is None or library is None:
+        if not incoming or library is None:
             return
         try:
             self._organizer.start(
@@ -107,11 +118,33 @@ class AutomaticOrganizeController:
         settings = self._settings_provider()
         if (
             settings.start_automatic
-            and self._window.incoming_path is not None
+            and self._window.incoming_paths
             and self._window.library_path is not None
             and not self._organizer.is_running
         ):
             self.toggle_running()
+
+    def review_candidate(self, candidate: object) -> None:
+        if not isinstance(candidate, CandidateSnapshot):
+            return
+        current = self._organizer.snapshot(candidate.candidate_id)
+        if current is None:
+            QMessageBox.information(
+                self._window,
+                "Candidate no longer available",
+                "This candidate is no longer in the automatic review queue.",
+            )
+            return
+        dialog = CandidateReviewDialog(current, self._window)
+        dialog.exec()
+        if dialog.add_rule_requested:
+            self.quick_add_rule(current)
+
+    def quick_add_rule(self, candidate: object) -> None:
+        if not isinstance(candidate, CandidateSnapshot) or self._rule_editor is None:
+            return
+        if self._rule_editor(candidate.source_path):
+            self._organizer.retry_review(candidate.candidate_id)
 
     def stop(self) -> None:
         try:

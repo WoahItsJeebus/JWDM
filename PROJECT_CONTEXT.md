@@ -970,7 +970,6 @@ Checklist:
 
 - Browser integrations
 - Download URL/source-site rules
-- Multiple automatic incoming folders, unless easy to support correctly
 - Cloud sync
 - AI classification
 - Plugin marketplace
@@ -1126,6 +1125,21 @@ uses signed installer upgrades rather than a background self-updater.
 - Signed release strategy
 - Update strategy
 
+### Post-1.0 usability and intake expansion
+
+**Status:** Complete as of 2026-07-22. Automatic organization persists and
+monitors one or more nonoverlapping top-level incoming folders. The main window
+keeps its running state, counts, and incoming summary compact so the active
+candidate table receives vertical space; completed moves leave that table and
+remain available through History. Double-clicking a candidate opens detailed
+review, while double-clicking a `No built-in rule...` detail opens a prefilled
+Rules > Add editor and restarts the full readiness pipeline after a rule is
+saved. An opt-in `Unknown` route handles unmatched files. Top-level folder
+candidates use a stable tree snapshot and route to `Folders` through journaled,
+collision-safe, verified, recoverable, and undoable same- or cross-volume
+transactions. Built-ins now include stronger creator/game/package coverage and
+a high-confidence `Texture Pack` ZIP filename signal.
+
 ## 24. Fixed Decisions
 
 Treat these as settled unless the owner explicitly changes them:
@@ -1197,9 +1211,11 @@ Do not silently decide these without recording the choice:
 
 ### 25.3 Resolved Phase 2 decisions
 
-- Phase 2 uses watchdog 6.0.0 and monitors one top-level incoming folder per
-  session. Existing files are not automatically scanned when monitoring starts;
-  Phase 3 adds an explicit opt-in setting for closed-app catch-up.
+- Phase 2 uses watchdog 6.0.0. The original implementation monitored one
+  top-level incoming folder; the post-1.0 expansion now creates one nonrecursive
+  watcher per persisted, nonoverlapping incoming root. Existing files are not
+  automatically scanned when monitoring starts; Phase 3 adds an explicit opt-in
+  setting for closed-app catch-up.
 - The active candidate registry remains thread-safe and in memory. Phase 3
   persists pending paths across restarts and resets their readiness sampling;
   Phase 4 separately recovers pending filesystem move operations from the
@@ -1316,7 +1332,7 @@ Do not silently decide these without recording the choice:
   Existing content remains eligible for the ordinary manual scan, preview, and
   separately confirmed transaction workflow. Some applications may retain
   their own independent download-path preference, which the UI states.
-- SQLite schema version 3 stores one exact Downloads relocation restore record.
+- SQLite schema version 3 introduced one exact Downloads relocation restore record.
   `prepared`, `active`, `restore_prepared`, `restored`, `rolled_back`, and
   `recovery_required` states preserve the original and target before each shell
   mutation. Startup/status reconciliation trusts the shell's observed path and
@@ -1345,6 +1361,34 @@ Do not silently decide these without recording the choice:
   require approval, and verify both digest and publisher signature before
   launching an installer. The current installation remains untouched on any
   verification failure.
+
+### 25.8 Resolved post-1.0 intake decisions
+
+- SQLite schema version 4 stores an ordered set of incoming folders. A legacy
+  single `incoming_path` setting migrates as the first configured root. Every
+  root remains top-level-only, is validated against the library and the other
+  roots, owns a watcher instance, and retains an independently persisted
+  candidate queue.
+- Unknown fallback is disabled by default. When explicitly enabled, only items
+  that reach the unmatched built-in-rule result route to `Unknown`; explicit
+  user review/ignore rules and low-confidence content inspection still win.
+- Direct child folders in top-level manual scans and automatic monitoring route
+  to the neutral `Folders` category. Recursive manual scans continue to organize
+  their contained files individually. Folder readiness uses stable tree
+  metadata and conservative access checks; links, junctions, and special entries
+  are refused. Cross-volume folder moves publish only after a content-manifest
+  hash matches and remove the source last. Optional directory metadata in the
+  version-1 JSONL journal preserves backward compatibility.
+- Completed automatic candidates are operational history, not pending work, so
+  they no longer occupy the active candidate table. Review and failed candidates
+  remain visible. Rule corrections always restart readiness rather than moving
+  directly from a stale review observation.
+- `.rbxm`, `.rbxl`, `.rbxmx`, and `.rbxlx` route to `Roblox`; `.tipa` routes to
+  `Installers/TrollStore`; `.ct` routes to `Cheat Engine/Tables`; and the broader
+  conservative extension map covers additional common image, audio, video,
+  archive, document, code, and installer formats. A ZIP name containing the
+  normalized phrase `Texture Pack` routes to `Images/Textures` only after
+  stronger archive-content markers have had priority.
 
 When a decision is made, update this document.
 

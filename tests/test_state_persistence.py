@@ -30,6 +30,7 @@ def test_state_database_migrates_and_round_trips_settings(tmp_path: Path) -> Non
     settings = AppSettings(
         library_path=library,
         incoming_path=incoming,
+        incoming_paths=(incoming, tmp_path / "incoming-two"),
         start_with_windows=True,
         launch_minimized=True,
         minimize_to_tray=False,
@@ -37,6 +38,7 @@ def test_state_database_migrates_and_round_trips_settings(tmp_path: Path) -> Non
         start_automatic=True,
         process_existing_on_start=True,
         confidence_policy=ConfidencePolicy.REVIEW_ALL,
+        route_unknown_to_folder=True,
         exclusions=(exclusion, exclusion),
     )
 
@@ -47,6 +49,11 @@ def test_state_database_migrates_and_round_trips_settings(tmp_path: Path) -> Non
     restored = repository.settings()
     assert restored == replace(
         settings,
+        incoming_path=incoming.resolve(strict=False),
+        incoming_paths=(
+            incoming.resolve(strict=False),
+            (tmp_path / "incoming-two").resolve(strict=False),
+        ),
         exclusions=(exclusion.resolve(strict=False),),
     )
 
@@ -123,7 +130,7 @@ def test_phase_three_database_migrates_volume_binding_schema(tmp_path: Path) -> 
 
     assert repository.volume_binding("library") == binding
     with sqlite3.connect(path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 4
 
 
 def test_phase_four_database_migrates_downloads_restore_schema(tmp_path: Path) -> None:
@@ -146,4 +153,20 @@ def test_phase_four_database_migrates_downloads_restore_schema(tmp_path: Path) -
 
     assert repository.downloads_relocation() == record
     with sqlite3.connect(path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 4
+
+
+def test_phase_six_database_migrates_multi_incoming_schema(tmp_path: Path) -> None:
+    path = tmp_path / "state.db"
+    repository = StateRepository(path)
+    legacy = tmp_path / "legacy-incoming"
+    repository.save_settings(AppSettings(incoming_path=legacy))
+    with sqlite3.connect(path) as connection:
+        connection.execute("DROP TABLE incoming_folders")
+        connection.execute("PRAGMA user_version = 3")
+
+    migrated = StateRepository(path)
+
+    assert migrated.settings().configured_incoming_paths == (legacy,)
+    with sqlite3.connect(path) as connection:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 4

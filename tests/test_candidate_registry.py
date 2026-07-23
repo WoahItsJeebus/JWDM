@@ -56,3 +56,27 @@ def test_changed_snapshot_restarts_stable_samples(tmp_path: Path) -> None:
     assert second is not None and second.stable_samples == 2 and not second_changed
     assert third is not None and third.stable_samples == 1 and third_changed
 
+
+def test_review_retry_discards_all_previous_readiness_observations(
+    tmp_path: Path,
+) -> None:
+    registry = CandidateRegistry()
+    source = tmp_path / "unknown.widget"
+    started = datetime(2026, 1, 1, tzinfo=UTC)
+    candidate = registry.register_event(source, tmp_path, "created", started)
+    registry.observe(candidate.candidate_id, 10, 20, started)
+    registry.transition(
+        candidate.candidate_id,
+        CandidateState.NEEDS_REVIEW,
+        "No built-in rule for .widget",
+    )
+
+    retried = registry.reset_for_review_retry(
+        candidate.candidate_id, started + timedelta(seconds=1)
+    )
+
+    assert retried is not None
+    assert retried.state is CandidateState.DETECTED
+    assert retried.last_size is None
+    assert retried.stable_samples == 0
+    assert retried.proposed_category is None

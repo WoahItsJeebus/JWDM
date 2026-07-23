@@ -53,6 +53,7 @@ class AppSettings:
 
     library_path: Path | None = None
     incoming_path: Path | None = None
+    incoming_paths: tuple[Path, ...] = ()
     start_with_windows: bool = False
     launch_minimized: bool = False
     minimize_to_tray: bool = True
@@ -60,7 +61,16 @@ class AppSettings:
     start_automatic: bool = False
     process_existing_on_start: bool = False
     confidence_policy: ConfidencePolicy = ConfidencePolicy.MOVE_RECOGNIZED
+    route_unknown_to_folder: bool = False
     exclusions: tuple[Path, ...] = ()
+
+    @property
+    def configured_incoming_paths(self) -> tuple[Path, ...]:
+        """Return the ordered multi-folder configuration with legacy fallback."""
+
+        if self.incoming_paths:
+            return self.incoming_paths
+        return (self.incoming_path,) if self.incoming_path is not None else ()
 
 
 @dataclass(frozen=True, slots=True)

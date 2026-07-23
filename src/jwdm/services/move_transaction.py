@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+import shutil
 import stat
 import uuid
 from dataclasses import dataclass
@@ -19,8 +20,9 @@ from jwdm.persistence.history import (
     HistoryRepository,
     OperationStatus,
 )
-from jwdm.pipeline.models import PlanItem, PlanItemStatus
+from jwdm.pipeline.models import PlanItem, PlanItemKind, PlanItemStatus
 from jwdm.services.destinations import destination_for, resolve_collision
+from jwdm.services.folder_snapshot import FolderSnapshotError, snapshot_folder
 from jwdm.services.volumes import VolumeService
 
 
@@ -112,6 +114,8 @@ class MoveTransactionService:
         return tuple(results)
 
     def undo(self, operation: HistoryOperation) -> MoveResult:
+        if operation.source_kind == PlanItemKind.DIRECTORY.value:
+            return self._undo_directory(operation)
         if operation.status not in {OperationStatus.COMPLETED, OperationStatus.UNDO_FAILED}:
             raise MoveError(f"Operation {operation.operation_id} is not undoable.")
         if operation.destination_modified_ns is None:
@@ -199,6 +203,8 @@ class MoveTransactionService:
             raise MoveError(message) from error
 
     def _move_one(self, library_root: Path, item: PlanItem) -> MoveResult:
+        if item.kind is PlanItemKind.DIRECTORY:
+            return self._move_directory_one(library_root, item)
         operation_id: str | None = None
         destination: Path | None = None
         intention_recorded = False
@@ -369,6 +375,243 @@ class MoveTransactionService:
                 self._discard_temporary(temporary)
             raise
 
+    def _move_directory_one(self, library_root: Path, item: PlanItem) -> MoveResult:
+        operation_id: str | None = None
+        destination: Path | None = None
+        intention_recorded = False
+        try:
+            if (
+                item.status is not PlanItemStatus.READY
+                or item.category is None
+                or item.source_fingerprint is None
+            ):
+                raise MoveError("Only reviewed folder plans with a stable snapshot can move.")
+            self._validate_current_directory(item.source, item, "Folder changed after preview.")
+            resolved_library = library_root.resolve(strict=True)
+            if not resolved_library.is_dir() or _is_link_or_junction(library_root):
+                raise MoveError(f"Library folder is unavailable or unsafe: {library_root}")
+            base_destination = destination_for(
+                resolved_library, item.category, item.source.name
+            )
+            base_destination.parent.mkdir(parents=True, exist_ok=True)
+            self._ensure_free_space(base_destination.parent, item.size)
+            destination, collision_behavior = resolve_collision(base_destination)
+            cross_volume = not self._volumes.same_volume(item.source, resolved_library)
+            operation_id = str(uuid.uuid4())
+            temporary = (
+                self._temporary_path(destination.parent, operation_id, "move")
+                if cross_volume
+                else None
+            )
+            operation = HistoryOperation(
+                operation_id=operation_id,
+                source=item.source,
+                destination=destination,
+                size=item.size,
+                source_modified_ns=item.modified_ns,
+                category=item.category,
+                reason=item.reason,
+                collision_behavior=collision_behavior,
+                status=OperationStatus.PENDING,
+                planned_at=datetime.now(UTC),
+                source_kind=PlanItemKind.DIRECTORY.value,
+                source_fingerprint=item.source_fingerprint,
+                cross_volume=cross_volume,
+                temporary_path=temporary,
+                source_volume_id=self._volumes.identity(item.source),
+                destination_volume_id=self._volumes.identity(resolved_library),
+            )
+            self._history.record_move_intended(operation)
+            intention_recorded = True
+            self._validate_current_directory(
+                item.source, item, "Folder changed while its move was being prepared."
+            )
+            if self._event_suppressor is not None:
+                self._event_suppressor.suppress(item.source, destination)
+            if cross_volume:
+                assert temporary is not None
+                self._copy_directory_verify_publish_remove(
+                    operation_id,
+                    item.source,
+                    destination,
+                    temporary,
+                    item,
+                    "move",
+                )
+            else:
+                item.source.rename(destination)
+            if cross_volume:
+                if snapshot_folder(destination).total_size != item.size:
+                    raise MoveError("Folder destination size differs after verified transfer.")
+            else:
+                self._verify_directory_snapshot(destination, item)
+            destination_modified_ns = destination.stat(follow_symlinks=False).st_mtime_ns
+            self._history.record_move_completed(operation_id, destination_modified_ns)
+            self._logger.info(
+                "Folder move completed",
+                extra={
+                    "event": "folder_move_completed",
+                    "operation_id": operation_id,
+                    "source": str(item.source),
+                    "destination": str(destination),
+                    "category": item.category,
+                    "outcome": "completed",
+                },
+            )
+            message = (
+                "Verified cross-volume folder move completed"
+                if cross_volume
+                else "Folder move completed"
+            )
+            return MoveResult(operation_id, item.source, destination, True, message)
+        except (OSError, MoveError, ValueError, HistoryError, FolderSnapshotError) as error:
+            if operation_id is not None and intention_recorded:
+                recovered = self._attempt_recorded_recovery(operation_id, str(error))
+                if recovered is not None:
+                    return recovered
+            self._logger.error(
+                "Folder move refused or failed",
+                extra={
+                    "event": "folder_move_failed",
+                    "operation_id": operation_id or "not_started",
+                    "source": str(item.source),
+                    "destination": str(destination) if destination else "",
+                    "outcome": "failed",
+                },
+                exc_info=True,
+            )
+            return MoveResult(operation_id, item.source, destination, False, str(error))
+
+    def _undo_directory(self, operation: HistoryOperation) -> MoveResult:
+        if operation.status not in {OperationStatus.COMPLETED, OperationStatus.UNDO_FAILED}:
+            raise MoveError(f"Operation {operation.operation_id} is not undoable.")
+        expected = self._directory_plan(operation, operation.destination)
+        if operation.content_hash is not None:
+            self._verify_directory_hash(operation.destination, operation.content_hash)
+        self._validate_current_directory(
+            operation.destination,
+            expected,
+            "Moved folder changed after the original operation; undo was refused.",
+        )
+        if operation.source.exists():
+            raise MoveError(
+                f"Original path is occupied; undo will not overwrite it: {operation.source}"
+            )
+        if not operation.source.parent.is_dir() or _is_link_or_junction(
+            operation.source.parent
+        ):
+            raise MoveError(f"Original parent folder is unavailable or unsafe: {operation.source.parent}")
+        cross_volume = not self._volumes.same_volume(
+            operation.destination, operation.source.parent
+        )
+        temporary = (
+            self._temporary_path(operation.source.parent, operation.operation_id, "undo")
+            if cross_volume
+            else None
+        )
+        if cross_volume:
+            self._ensure_free_space(operation.source.parent, operation.size)
+        try:
+            self._history.record_undo_intended(
+                operation.operation_id,
+                cross_volume=cross_volume,
+                temporary_path=temporary,
+            )
+            if self._event_suppressor is not None:
+                self._event_suppressor.suppress(operation.destination, operation.source)
+            if cross_volume:
+                assert temporary is not None
+                self._copy_directory_verify_publish_remove(
+                    operation.operation_id,
+                    operation.destination,
+                    operation.source,
+                    temporary,
+                    expected,
+                    "undo",
+                )
+            else:
+                operation.destination.rename(operation.source)
+            if cross_volume:
+                if snapshot_folder(operation.source).total_size != operation.size:
+                    raise MoveError("Restored folder size differs after verified transfer.")
+            else:
+                self._verify_directory_snapshot(operation.source, expected)
+            self._history.record_undo_completed(operation.operation_id)
+            self._logger.info(
+                "Folder move undone",
+                extra={
+                    "event": "folder_move_undone",
+                    "operation_id": operation.operation_id,
+                    "source": str(operation.destination),
+                    "destination": str(operation.source),
+                    "outcome": "completed",
+                },
+            )
+            return MoveResult(
+                operation.operation_id,
+                operation.destination,
+                operation.source,
+                True,
+                "Folder undo completed",
+            )
+        except (OSError, MoveError, HistoryError, FolderSnapshotError) as error:
+            recovered = self._attempt_recorded_recovery(operation.operation_id, str(error))
+            if recovered is not None and recovered.succeeded:
+                return recovered
+            message = recovered.message if recovered is not None else str(error)
+            raise MoveError(message) from error
+
+    def _copy_directory_verify_publish_remove(
+        self,
+        operation_id: str,
+        source: Path,
+        destination: Path,
+        temporary: Path,
+        expected: PlanItem,
+        direction: TransferDirection,
+    ) -> None:
+        copy_checkpoint = False
+        try:
+            if temporary.exists():
+                raise MoveError(f"Folder transfer temporary path is occupied: {temporary}")
+            shutil.copytree(source, temporary, copy_function=shutil.copy2, symlinks=True)
+            temporary_snapshot = snapshot_folder(temporary)
+            for copied_file in temporary_snapshot.files:
+                with copied_file.open("rb+") as stream:
+                    stream.flush()
+                    os.fsync(stream.fileno())
+            self._validate_current_directory(
+                source,
+                expected,
+                "Folder changed during cross-volume copy; it was not removed.",
+            )
+            source_hash = self._directory_content_hash(source)
+            temporary_hash = self._directory_content_hash(temporary)
+            if source_hash != temporary_hash:
+                raise MoveError(
+                    "Cross-volume folder verification failed; source was not removed."
+                )
+            self._history.record_copy_verified(
+                operation_id, source_hash, direction=direction
+            )
+            copy_checkpoint = True
+            temporary.rename(destination)
+            self._validate_current_directory(
+                source,
+                expected,
+                "Folder changed after copy verification; it was not removed.",
+            )
+            if self._directory_content_hash(source) != source_hash:
+                raise MoveError(
+                    "Folder content changed after copy verification; source was not removed."
+                )
+            self._remove_verified_directory(source)
+            self._history.record_source_removed(operation_id, direction=direction)
+        except (OSError, MoveError, HistoryError, FolderSnapshotError):
+            if not copy_checkpoint:
+                self._discard_directory_temporary(temporary)
+            raise
+
     def _attempt_recorded_recovery(
         self, operation_id: str, failure_reason: str
     ) -> MoveResult | None:
@@ -404,11 +647,151 @@ class MoveTransactionService:
     def _recover_operation(
         self, operation: HistoryOperation, failure_reason: str
     ) -> MoveResult:
+        if operation.source_kind == PlanItemKind.DIRECTORY.value:
+            return self._recover_directory_operation(operation, failure_reason)
         if operation.status is OperationStatus.PENDING:
             return self._recover_move(operation, failure_reason)
         if operation.status is OperationStatus.UNDO_PENDING:
             return self._recover_undo(operation, failure_reason)
         raise MoveError(f"Operation {operation.operation_id} is not pending recovery.")
+
+    def _recover_directory_operation(
+        self, operation: HistoryOperation, failure_reason: str
+    ) -> MoveResult:
+        if operation.status is OperationStatus.PENDING:
+            if operation.cross_volume:
+                return self._recover_directory_cross(
+                    operation,
+                    operation.source,
+                    operation.destination,
+                    operation.temporary_path,
+                    operation.copy_verified,
+                    operation.source_removed,
+                    "move",
+                    failure_reason,
+                )
+            return self._recover_directory_same(operation, "move", failure_reason)
+        if operation.status is OperationStatus.UNDO_PENDING:
+            if operation.undo_cross_volume:
+                return self._recover_directory_cross(
+                    operation,
+                    operation.destination,
+                    operation.source,
+                    operation.undo_temporary_path,
+                    operation.undo_copy_verified,
+                    operation.undo_source_removed,
+                    "undo",
+                    failure_reason,
+                )
+            return self._recover_directory_same(operation, "undo", failure_reason)
+        raise MoveError(f"Folder operation {operation.operation_id} is not pending recovery.")
+
+    def _recover_directory_same(
+        self,
+        operation: HistoryOperation,
+        direction: TransferDirection,
+        failure_reason: str,
+    ) -> MoveResult:
+        transfer_source = operation.source if direction == "move" else operation.destination
+        transfer_destination = (
+            operation.destination if direction == "move" else operation.source
+        )
+        if transfer_destination.is_dir() and not transfer_source.exists():
+            expected = self._directory_plan(operation, transfer_destination)
+            self._verify_directory_snapshot(transfer_destination, expected)
+            if direction == "move":
+                modified = transfer_destination.stat(follow_symlinks=False).st_mtime_ns
+                self._history.record_move_completed(operation.operation_id, modified)
+                message = "Same-volume folder move recovered"
+            else:
+                self._history.record_undo_completed(operation.operation_id)
+                message = "Same-volume folder undo recovered"
+            return MoveResult(
+                operation.operation_id,
+                transfer_source,
+                transfer_destination,
+                True,
+                message,
+            )
+        if transfer_source.is_dir() and not transfer_destination.exists():
+            if direction == "move":
+                self._history.record_move_failed(operation.operation_id, failure_reason)
+            else:
+                self._history.record_undo_failed(operation.operation_id, failure_reason)
+            return MoveResult(
+                operation.operation_id,
+                transfer_source,
+                transfer_destination,
+                False,
+                f"Folder transfer did not mutate its source: {failure_reason}",
+            )
+        raise MoveError(
+            "Both or neither folder path exists; JWDM left all paths unchanged."
+        )
+
+    def _recover_directory_cross(
+        self,
+        operation: HistoryOperation,
+        transfer_source: Path,
+        transfer_destination: Path,
+        temporary: Path | None,
+        copy_verified: bool,
+        source_removed: bool,
+        direction: TransferDirection,
+        failure_reason: str,
+    ) -> MoveResult:
+        if temporary is None:
+            raise MoveError("Cross-volume folder recovery has no temporary path.")
+        self._validate_temporary_path(
+            temporary, transfer_destination, operation.operation_id, direction
+        )
+        if not copy_verified or operation.content_hash is None:
+            if transfer_source.is_dir() and not transfer_destination.exists():
+                self._discard_directory_temporary(temporary)
+                if direction == "move":
+                    self._history.record_move_failed(operation.operation_id, failure_reason)
+                else:
+                    self._history.record_undo_failed(operation.operation_id, failure_reason)
+                return MoveResult(
+                    operation.operation_id,
+                    transfer_source,
+                    transfer_destination,
+                    False,
+                    f"Unverified folder copy was discarded; source remains: {failure_reason}",
+                )
+            raise MoveError("Cross-volume folder copy has no durable verification checkpoint.")
+        if not transfer_destination.is_dir():
+            if transfer_destination.exists():
+                raise MoveError("Final folder recovery path is occupied.")
+            if not temporary.is_dir():
+                raise MoveError("Verified folder copy is missing from temporary and final paths.")
+            self._verify_directory_hash(temporary, operation.content_hash)
+            temporary.rename(transfer_destination)
+        elif temporary.exists():
+            raise MoveError("Both temporary and final folder copies exist; no path was removed.")
+        self._verify_directory_hash(transfer_destination, operation.content_hash)
+        if transfer_source.is_dir():
+            self._verify_directory_hash(transfer_source, operation.content_hash)
+            self._remove_verified_directory(transfer_source)
+            self._history.record_source_removed(operation.operation_id, direction=direction)
+        elif transfer_source.exists():
+            raise MoveError("Folder recovery source is occupied by a non-directory path.")
+        elif not source_removed:
+            self._history.record_source_removed(operation.operation_id, direction=direction)
+        if direction == "move":
+            modified = transfer_destination.stat(follow_symlinks=False).st_mtime_ns
+            self._history.record_move_completed(operation.operation_id, modified)
+            message = "Verified cross-volume folder move recovered"
+        else:
+            self._history.record_undo_completed(operation.operation_id)
+            message = "Verified cross-volume folder undo recovered"
+        return MoveResult(
+            operation.operation_id,
+            transfer_source,
+            transfer_destination,
+            True,
+            message,
+        )
 
     def _recover_move(
         self, operation: HistoryOperation, failure_reason: str
@@ -588,6 +971,100 @@ class MoveTransactionService:
             raise MoveError(f"Path is no longer a regular file: {path}")
         if current.st_size != expected_size or current.st_mtime_ns != expected_modified_ns:
             raise MoveError(changed_message)
+
+    @staticmethod
+    def _directory_plan(operation: HistoryOperation, source: Path) -> PlanItem:
+        if operation.source_fingerprint is None:
+            raise MoveError("Folder history has no stable source fingerprint.")
+        current = snapshot_folder(source)
+        return PlanItem(
+            source=source,
+            source_root=source.parent,
+            size=operation.size,
+            modified_ns=current.modified_token,
+            status=PlanItemStatus.READY,
+            category=operation.category,
+            confidence="history",
+            reason=operation.reason,
+            proposed_destination=None,
+            kind=PlanItemKind.DIRECTORY,
+            source_fingerprint=(
+                current.fingerprint if operation.content_hash is not None else operation.source_fingerprint
+            ),
+        )
+
+    @staticmethod
+    def _validate_current_directory(
+        path: Path, expected: PlanItem, changed_message: str
+    ) -> None:
+        if expected.source_fingerprint is None:
+            raise MoveError("Folder plan has no stable source fingerprint.")
+        current = snapshot_folder(path)
+        if (
+            current.total_size != expected.size
+            or current.modified_token != expected.modified_ns
+            or current.fingerprint != expected.source_fingerprint
+        ):
+            raise MoveError(changed_message)
+
+    @classmethod
+    def _verify_directory_snapshot(cls, path: Path, expected: PlanItem) -> None:
+        cls._validate_current_directory(
+            path,
+            expected,
+            "Folder verification failed because its tree changed.",
+        )
+
+    @staticmethod
+    def _directory_content_hash(root: Path) -> str:
+        snapshot = snapshot_folder(root)
+        digest = hashlib.sha256()
+        directories: list[str] = []
+        for directory, child_directories, _files in os.walk(root, topdown=True):
+            child_directories.sort(key=str.casefold)
+            directory_path = Path(directory)
+            for name in child_directories:
+                child = directory_path / name
+                if _is_link_or_junction(child):
+                    raise MoveError(f"Linked folder content is not transferred: {child}")
+                directories.append(child.relative_to(root).as_posix())
+        for relative in sorted(directories, key=str.casefold):
+            digest.update(f"D\0{relative}\0".encode("utf-8", errors="surrogatepass"))
+        for path in sorted(
+            snapshot.files,
+            key=lambda item: item.relative_to(root).as_posix().casefold(),
+        ):
+            relative = path.relative_to(root).as_posix()
+            current = path.stat(follow_symlinks=False)
+            digest.update(
+                f"F\0{relative}\0{current.st_size}\0".encode(
+                    "utf-8", errors="surrogatepass"
+                )
+            )
+            with path.open("rb") as stream:
+                while chunk := stream.read(MoveTransactionService._COPY_BUFFER_SIZE):
+                    digest.update(chunk)
+        return digest.hexdigest()
+
+    @classmethod
+    def _verify_directory_hash(cls, path: Path, expected_hash: str) -> None:
+        if cls._directory_content_hash(path) != expected_hash:
+            raise MoveError(f"Folder SHA-256 verification failed; no source was removed: {path}")
+
+    @staticmethod
+    def _remove_verified_directory(path: Path) -> None:
+        if _is_link_or_junction(path) or not path.is_dir():
+            raise MoveError(f"Refusing to remove an unexpected folder source: {path}")
+        snapshot_folder(path)
+        shutil.rmtree(path)
+
+    @staticmethod
+    def _discard_directory_temporary(path: Path) -> None:
+        if not path.exists():
+            return
+        if _is_link_or_junction(path) or not path.is_dir():
+            raise MoveError(f"Refusing to remove unexpected folder temporary path: {path}")
+        shutil.rmtree(path)
 
     def _ensure_free_space(self, directory: Path, required_bytes: int) -> None:
         try:

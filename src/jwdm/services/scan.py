@@ -14,6 +14,7 @@ from jwdm.classification.smart_classifier import SmartClassifier
 from jwdm.pipeline.models import (
     ClassificationDisposition,
     PlanItem,
+    PlanItemKind,
     PlanItemStatus,
     ScanIssue,
     ScanPlan,
@@ -23,6 +24,7 @@ from jwdm.pipeline.models import (
 )
 from jwdm.services.destinations import destination_for, resolve_collision
 from jwdm.services.exclusions import ExclusionMatcher
+from jwdm.services.folder_snapshot import FolderSnapshotError, snapshot_folder
 from jwdm.services.path_validation import PathValidator, ValidatedPaths
 
 
@@ -31,6 +33,7 @@ ProgressCallback = Callable[[ScanProgress], None]
 
 class _DiscoveredKind(StrEnum):
     FILE = "file"
+    DIRECTORY = "directory"
     EXCLUDED = "excluded"
     LINK = "link"
 
@@ -99,7 +102,7 @@ class ScanService:
                         reserved_destinations,
                     )
                 )
-            except OSError as error:
+            except (OSError, FolderSnapshotError) as error:
                 issues.append(ScanIssue(entry.path, f"Cannot inspect path: {error}"))
             if index == 1 or index == total or index % 10 == 0:
                 self._report(
@@ -168,6 +171,8 @@ class ScanService:
                         issues,
                         progress_callback,
                     )
+                elif entry.is_dir(follow_symlinks=False):
+                    kind = _DiscoveredKind.DIRECTORY
                 if kind is not None:
                     discovered.append(_DiscoveredEntry(scan_root.path, path, kind))
                     count = len(discovered)
@@ -212,6 +217,31 @@ class ScanService:
                 confidence="user",
                 reason="Excluded by settings",
                 proposed_destination=None,
+            )
+        if entry.kind is _DiscoveredKind.DIRECTORY:
+            folder = snapshot_folder(entry.path)
+            base_destination = destination_for(
+                library_root, "Folders", entry.path.name
+            )
+            proposed_destination, collision_behavior = resolve_collision(
+                base_destination, reserved_destinations
+            )
+            reason = "Top-level folder routes to Folders"
+            if collision_behavior != "none":
+                reason = f"{reason}; existing name retained with safe numbering"
+            return PlanItem(
+                source=entry.path,
+                source_root=entry.source_root,
+                size=folder.total_size,
+                modified_ns=folder.modified_token,
+                status=PlanItemStatus.READY,
+                category="Folders",
+                confidence="high",
+                reason=reason,
+                proposed_destination=proposed_destination,
+                collision_behavior=collision_behavior,
+                kind=PlanItemKind.DIRECTORY,
+                source_fingerprint=folder.fingerprint,
             )
         return self._plan_file(
             entry.source_root,

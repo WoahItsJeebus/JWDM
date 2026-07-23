@@ -92,6 +92,34 @@ class PathValidator:
             normalized_library,
         )
 
+    def validate_automatic_roots(
+        self,
+        incoming_roots: tuple[Path, ...],
+        configured_library: Path,
+        available_library: Path | None,
+    ) -> ValidatedPaths:
+        """Validate every nonrecursive automatic root as one coherent set."""
+
+        if not incoming_roots:
+            raise PathValidationError("Configure at least one incoming folder.")
+        if available_library is not None:
+            return self.validate(
+                tuple(ScanRoot(path, False) for path in incoming_roots),
+                available_library,
+            )
+        validated = tuple(
+            self.validate_automatic(path, configured_library, None).roots[0]
+            for path in incoming_roots
+        )
+        for index, root in enumerate(validated):
+            for other in validated[index + 1 :]:
+                if _contains(root.path, other.path) or _contains(other.path, root.path):
+                    raise PathValidationError(
+                        "Incoming folders overlap and would monitor candidates twice: "
+                        f"{root.path} and {other.path}"
+                    )
+        return ValidatedPaths(validated, configured_library.expanduser().resolve(strict=False))
+
     @staticmethod
     def _existing_directory(path: Path, label: str) -> Path:
         expanded = path.expanduser()

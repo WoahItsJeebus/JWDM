@@ -13,6 +13,8 @@ from jwdm.config import (
     AppSettings,
     DownloadsRelocationRecord,
     DownloadsRelocationState,
+    ExtensionRule,
+    RuleAction,
 )
 from jwdm.persistence.state import StateRepository
 from jwdm.services.downloads import DownloadsStatus
@@ -172,4 +174,43 @@ def test_downloads_controller_updates_and_restores_explicit_incoming_choice(
     assert repository.settings().incoming_path == original
     assert window.incoming_path == original
     dialog.close()
+    window.deleteLater()
+
+
+def test_candidate_quick_add_opens_prefilled_rule_and_persists_it(
+    application: QApplication,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = StateRepository(tmp_path / "state.db")
+    settings = AppSettings()
+    window = MainWindow()
+    controller = SettingsController(
+        application,
+        window,
+        repository,
+        _Startup(),
+        settings,
+    )
+
+    class _RuleEditor:
+        def __init__(self, seed: ExtensionRule, parent: object) -> None:
+            assert seed.extension == ".widget"
+            self.title = ""
+
+        def setWindowTitle(self, title: str) -> None:
+            self.title = title
+
+        def exec(self) -> QDialog.DialogCode:
+            assert self.title == "Rules > Add"
+            return QDialog.DialogCode.Accepted
+
+        def rule(self) -> ExtensionRule:
+            return ExtensionRule(".widget", RuleAction.ROUTE, "Custom/Widgets")
+
+    monkeypatch.setattr("jwdm.app.settings.ExtensionRuleDialog", _RuleEditor)
+
+    assert controller.add_rule_for_path(tmp_path / "download.widget")
+    assert repository.rules()[0].extension == ".widget"
+    assert repository.rules()[0].category == "Custom/Widgets"
     window.deleteLater()

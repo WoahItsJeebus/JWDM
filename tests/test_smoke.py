@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 from PySide6.QtGui import QPalette
 from PySide6.QtWidgets import (
     QApplication,
+    QGroupBox,
     QHeaderView,
     QLabel,
     QProgressBar,
@@ -19,9 +21,12 @@ from PySide6.QtWidgets import (
 from jwdm import __version__
 from jwdm.config import AppSettings
 from jwdm.logging_config import APPLICATION_LOGGER, configure_logging
+from jwdm.pipeline.candidate import CandidateState
 from jwdm.pipeline.models import ScanRoot
+from jwdm.services.candidate_registry import CandidateRegistry
 from jwdm.services.scan import ScanService
 from jwdm.ui.main_window import MainWindow
+from jwdm.ui.candidate_dialogs import CandidateReviewDialog
 from jwdm.ui.manual_dialogs import CategoryCorrectionDialog, ReviewDialog
 from jwdm.ui.settings_dialogs import DownloadsRelocationDialog, SettingsDialog
 from jwdm.ui.tray import TrayController
@@ -93,6 +98,59 @@ def test_main_window_and_tray_shell(application: QApplication) -> None:
     assert tray.exit_action.text() == "Exit"
 
     tray.icon.hide()
+    window.close()
+
+
+def test_main_window_prioritizes_candidate_list_and_double_click_review(
+    application: QApplication, tmp_path: Path
+) -> None:
+    window = MainWindow()
+    window.resize(1000, 1300)
+    window.show()
+    application.processEvents()
+
+    manual = window.findChild(QGroupBox, "manualOrganizationGroup")
+    assert manual is not None
+    assert window.rules_button.mapTo(window, window.rules_button.rect().topLeft()).y() < (
+        manual.mapTo(window, manual.rect().topLeft()).y()
+    )
+    assert window.candidate_table.maximumHeight() > 10_000
+    assert window.candidate_table.height() > 350
+    assert window.incoming_edit.height() < 50
+    assert window.automatic_status_label.height() < 50
+
+    incoming = tmp_path / "incoming"
+    candidate_path = incoming / "unknown.widget"
+    registry = CandidateRegistry()
+    candidate = registry.register_event(
+        candidate_path, incoming, "created", datetime.now(UTC)
+    )
+    candidate = registry.transition(
+        candidate.candidate_id,
+        CandidateState.NEEDS_REVIEW,
+        "No built-in rule for .widget",
+    )
+    assert candidate is not None
+    requested_rules: list[object] = []
+    requested_reviews: list[object] = []
+    window.candidate_rule_requested.connect(requested_rules.append)
+    window.candidate_review_requested.connect(requested_reviews.append)
+    window.set_candidates((candidate,))
+    window._candidate_double_clicked(0, 2)
+    window._candidate_double_clicked(0, 0)
+    assert requested_rules == [candidate]
+    assert requested_reviews == [candidate]
+
+    review = CandidateReviewDialog(candidate)
+    assert review.add_rule_button is not None
+    assert ".widget" in review.add_rule_button.text()
+    review.close()
+
+    moved = registry.transition(candidate.candidate_id, CandidateState.MOVED, "done")
+    assert moved is not None
+    window.set_candidates((moved,))
+    assert window.candidate_table.rowCount() == 0
+    assert window.candidate_counts_label.text().startswith("Pending: 0")
     window.close()
 
 
@@ -174,6 +232,15 @@ def test_downloads_settings_expose_explicit_relocate_and_restore_controls(
     assert restore is not None
     assert not relocate.isEnabled()
     assert not restore.isEnabled()
+    assert settings.route_unknown.isChecked() is False
+
+    first = tmp_path / "incoming-one"
+    second = tmp_path / "incoming-two"
+    settings.set_incoming_paths((first, second))
+    settings.route_unknown.setChecked(True)
+    selected = settings.selected_settings()
+    assert selected.configured_incoming_paths == (first, second)
+    assert selected.route_unknown_to_folder
 
     current = tmp_path / "Downloads"
     settings.set_downloads_status(

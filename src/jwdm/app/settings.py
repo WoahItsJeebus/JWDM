@@ -11,10 +11,11 @@ from PySide6.QtCore import QTimer
 from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import QApplication, QDialog, QMessageBox
 
-from jwdm.config import AppSettings
+from jwdm.config import AppSettings, ExtensionRule, RuleAction
 from jwdm.logging_config import APPLICATION_LOGGER
 from jwdm.persistence.state import StateError, StateRepository
 from jwdm.services.library_destination import LibraryDestinationService
+from jwdm.services.rule_suggestions import suggested_extension
 from jwdm.services.downloads import (
     DownloadsRelocationError,
     DownloadsRelocationService,
@@ -24,6 +25,7 @@ from jwdm.services.startup import StartupError, StartupManager
 from jwdm.ui.main_window import MainWindow
 from jwdm.ui.settings_dialogs import (
     DownloadsRelocationDialog,
+    ExtensionRuleDialog,
     RulesDialog,
     SettingsDialog,
 )
@@ -57,14 +59,14 @@ class SettingsController:
 
         if settings.library_path is not None:
             window.set_library_path(settings.library_path)
-        if settings.incoming_path is not None:
-            window.set_incoming_path(settings.incoming_path)
+        if settings.configured_incoming_paths:
+            window.set_incoming_paths(settings.configured_incoming_paths)
 
         window.settings_requested.connect(self.show_settings)
         window.rules_requested.connect(self.show_rules)
         window.close_requested.connect(self.handle_close)
         window.library_path_changed.connect(self._path_changed)
-        window.incoming_path_changed.connect(self._path_changed)
+        window.incoming_paths_changed.connect(self._paths_changed)
         self._destination_timer = QTimer(window)
         self._destination_timer.setInterval(2000)
         self._destination_timer.timeout.connect(self.refresh_destination_status)
@@ -123,6 +125,7 @@ class SettingsController:
             QMessageBox.critical(self._window, "Settings were not saved", str(error))
             return
         self._settings = updated
+        self._window.set_incoming_paths(updated.configured_incoming_paths)
         self._logger.info("Settings saved", extra={"event": "settings_saved"})
 
     def _relocate_downloads(self, dialog: SettingsDialog) -> None:
@@ -174,9 +177,11 @@ class SettingsController:
 
         incoming_updated = True
         if editor.use_as_incoming.isChecked() and updated_status.current_path is not None:
-            incoming_updated = self._save_incoming_path(
-                updated_status.current_path, dialog
+            incoming_paths = self._append_incoming(
+                self._settings.configured_incoming_paths,
+                updated_status.current_path,
             )
+            incoming_updated = self._save_incoming_paths(incoming_paths, dialog)
         self._apply_downloads_status(dialog, updated_status)
         message = (
             f"Windows Downloads now points to:\n{updated_status.current_path}\n\n"
@@ -243,15 +248,21 @@ class SettingsController:
 
         incoming_updated = True
         if (
-            self._settings.incoming_path is not None
+            self._settings.configured_incoming_paths
             and restored.current_path is not None
-            and self._paths_match(
-                self._settings.incoming_path,
-                record.relocated_path,
+            and any(
+                self._paths_match(path, record.relocated_path)
+                for path in self._settings.configured_incoming_paths
             )
         ):
-            incoming_updated = self._save_incoming_path(
-                restored.current_path, dialog
+            replaced = tuple(
+                restored.current_path
+                if self._paths_match(path, record.relocated_path)
+                else path
+                for path in self._settings.configured_incoming_paths
+            )
+            incoming_updated = self._save_incoming_paths(
+                self._deduplicate_paths(replaced), dialog
             )
         self._apply_downloads_status(dialog, restored)
         message = (
@@ -305,12 +316,16 @@ class SettingsController:
             can_restore=status.can_restore,
         )
 
-    def _save_incoming_path(
+    def _save_incoming_paths(
         self,
-        path: Path,
+        paths: tuple[Path, ...],
         dialog: SettingsDialog,
     ) -> bool:
-        updated = replace(self._settings, incoming_path=path)
+        updated = replace(
+            self._settings,
+            incoming_path=paths[0] if paths else None,
+            incoming_paths=paths,
+        )
         try:
             self._repository.save_settings(updated)
         except StateError:
@@ -320,8 +335,9 @@ class SettingsController:
             )
             return False
         self._settings = updated
-        self._window.incoming_edit.setText(str(path))
+        self._window.set_incoming_paths(paths)
         dialog.set_base_settings(updated)
+        dialog.set_incoming_paths(paths)
         return True
 
     @staticmethod
@@ -348,6 +364,47 @@ class SettingsController:
             "User extension rules saved",
             extra={"event": "rules_saved", "count": len(dialog.selected_rules())},
         )
+
+    def add_rule_for_path(self, path: Path) -> bool:
+        """Open the Rules > Add editor prefilled from one reviewed candidate."""
+
+        extension = suggested_extension(path)
+        if extension is None:
+            QMessageBox.information(
+                self._window,
+                "Rule unavailable",
+                "This item does not have an extension that can be used by a basic rule.",
+            )
+            return False
+        try:
+            existing = self._repository.rules()
+        except StateError as error:
+            QMessageBox.critical(self._window, "Rules unavailable", str(error))
+            return False
+        if any(rule.extension.casefold() == extension.casefold() for rule in existing):
+            QMessageBox.information(
+                self._window,
+                "Rule already exists",
+                f"A user rule for {extension} already exists. Open Rules to edit it.",
+            )
+            return False
+        editor = ExtensionRuleDialog(
+            ExtensionRule(extension, RuleAction.ROUTE, None),
+            self._window,
+        )
+        editor.setWindowTitle("Rules > Add")
+        if editor.exec() != QDialog.DialogCode.Accepted:
+            return False
+        try:
+            self._repository.upsert_rules((editor.rule(),))
+        except StateError as error:
+            QMessageBox.critical(self._window, "Rule was not saved", str(error))
+            return False
+        self._logger.info(
+            "Candidate quick rule saved",
+            extra={"event": "candidate_rule_saved", "extension": extension},
+        )
+        return True
 
     def refresh_destination_status(self) -> None:
         if self._library_destination is None or self._settings.library_path is None:
@@ -401,10 +458,18 @@ class SettingsController:
         QTimer.singleShot(0, self._application.quit)
 
     def _path_changed(self, _path: Path) -> None:
+        self._save_window_paths()
+
+    def _paths_changed(self, _paths: object) -> None:
+        self._save_window_paths()
+
+    def _save_window_paths(self) -> None:
+        incoming_paths = self._window.incoming_paths
         updated = replace(
             self._settings,
             library_path=self._window.library_path,
-            incoming_path=self._window.incoming_path,
+            incoming_path=incoming_paths[0] if incoming_paths else None,
+            incoming_paths=incoming_paths,
         )
         if updated == self._settings:
             return
@@ -453,3 +518,17 @@ class SettingsController:
             )
             return
         self._settings = updated
+
+    @classmethod
+    def _append_incoming(
+        cls, paths: tuple[Path, ...], candidate: Path
+    ) -> tuple[Path, ...]:
+        return cls._deduplicate_paths((*paths, candidate))
+
+    @classmethod
+    def _deduplicate_paths(cls, paths: tuple[Path, ...]) -> tuple[Path, ...]:
+        unique: list[Path] = []
+        for path in paths:
+            if not any(cls._paths_match(path, existing) for existing in unique):
+                unique.append(path)
+        return tuple(unique)

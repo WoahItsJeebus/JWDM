@@ -41,6 +41,8 @@ class HistoryOperation:
     collision_behavior: str
     status: OperationStatus
     planned_at: datetime
+    source_kind: str = "file"
+    source_fingerprint: str | None = None
     cross_volume: bool = False
     temporary_path: Path | None = None
     source_volume_id: str | None = None
@@ -82,6 +84,8 @@ class HistoryRepository:
                 "category": operation.category,
                 "reason": operation.reason,
                 "collision_behavior": operation.collision_behavior,
+                "source_kind": operation.source_kind,
+                "source_fingerprint": operation.source_fingerprint,
                 "cross_volume": operation.cross_volume,
                 "temporary_path": (
                     str(operation.temporary_path)
@@ -195,6 +199,13 @@ class HistoryRepository:
                     ),
                     status=OperationStatus.PENDING,
                     planned_at=occurred_at,
+                    source_kind=self._optional_text(
+                        event, "source_kind", line_number
+                    )
+                    or "file",
+                    source_fingerprint=self._optional_text(
+                        event, "source_fingerprint", line_number
+                    ),
                     cross_volume=self._optional_bool(
                         event, "cross_volume", line_number, False
                     ),

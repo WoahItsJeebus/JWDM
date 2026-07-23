@@ -30,19 +30,28 @@ destination, and only then remove the unchanged source.
 
 ## Automatic organization
 
-1. Choose an existing organized library and one incoming folder.
+1. Choose an existing organized library and one or more incoming folders.
 2. Select **Start automatic organization**. Monitoring is top-level only. A
    setting can opt into processing files already present when monitoring starts.
 3. New candidates must remain unchanged for four samples and at least three
    quiet seconds, then pass an exclusive Windows read-access probe.
 4. Explicit user rules run first. High-confidence archive, image, texture, and
    extension results move through the same journaled transaction and undo history.
-   Unknown, suspicious, or low-confidence results remain in **Needs review**.
+   Unknown, suspicious, or low-confidence results remain in **Needs review**
+   unless the optional `Unknown` destination is enabled for unmatched formats.
 5. Pause or resume processing from either the main window or tray. Pending paths
    survive restart, but readiness sampling restarts from zero for safety.
 6. If the bound library volume disconnects, candidates remain queued at their
    sources. Processing resumes only when the same volume identity reconnects,
    including at a different drive letter.
+
+Double-click an automatic candidate for detailed review. Double-clicking a
+`No built-in rule...` detail opens a prefilled **Rules > Add** editor. Completed
+moves leave the active candidate list and remain available in History.
+
+Top-level folders route intact to `Folders` through the same journaled,
+verified, undoable move service. Recursive manual scans continue to organize the
+files inside a folder rather than moving that selected tree as one item.
 
 ## Rules and settings
 
@@ -52,8 +61,8 @@ destination, and only then remove the unchanged source.
   extension. Confirmed suggestions create or update rules atomically before any
   approved files move; conflicting suggestions are refused.
 - **Settings** controls Start with Windows, launch minimized, close-to-tray,
-  automatic startup, existing-file catch-up, confidence policy, and excluded
-  folders.
+  automatic startup, multiple incoming folders, existing-file catch-up,
+  confidence policy, the optional `Unknown` route, and excluded folders.
 - Start with Windows uses the current user's standard Windows Run entry and does
   not require administrator privileges.
 - Closing the window minimizes to the tray by default when a tray is available;

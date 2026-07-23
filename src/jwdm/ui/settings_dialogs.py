@@ -86,16 +86,42 @@ class SettingsDialog(QDialog):
         )
         self.process_existing.setObjectName("processExisting")
         self.process_existing.setChecked(settings.process_existing_on_start)
+        self.route_unknown = QCheckBox(
+            "Move items without a matching rule into the Unknown folder"
+        )
+        self.route_unknown.setObjectName("routeUnknownToFolder")
+        self.route_unknown.setChecked(settings.route_unknown_to_folder)
+        self.incoming_folders = QListWidget()
+        self.incoming_folders.setObjectName("incomingFolderList")
+        for path in settings.configured_incoming_paths:
+            self.incoming_folders.addItem(str(path))
+        add_incoming = QPushButton("Add folder…")
+        add_incoming.setObjectName("addIncomingFolder")
+        add_incoming.clicked.connect(self._add_incoming)
+        remove_incoming = QPushButton("Remove selected")
+        remove_incoming.setObjectName("removeIncomingFolder")
+        remove_incoming.clicked.connect(self._remove_incoming)
+        incoming_actions = QHBoxLayout()
+        incoming_actions.addWidget(add_incoming)
+        incoming_actions.addWidget(remove_incoming)
+        incoming_actions.addStretch()
+        incoming_editor = QWidget()
+        incoming_layout = QVBoxLayout(incoming_editor)
+        incoming_layout.setContentsMargins(0, 0, 0, 0)
+        incoming_layout.addWidget(self.incoming_folders)
+        incoming_layout.addLayout(incoming_actions)
         automation_note = QLabel(
-            "Unknown formats always remain in place for review. Readiness and access checks "
-            "still apply under every policy."
+            "Every incoming folder is watched at its top level only. Readiness and access "
+            "checks still apply under every policy, including the optional Unknown route."
         )
         automation_note.setWordWrap(True)
 
         automation = QWidget()
         automation_layout = QFormLayout(automation)
+        automation_layout.addRow("Incoming folders", incoming_editor)
         automation_layout.addRow("Automatic confidence policy", self.confidence_policy)
         automation_layout.addRow(self.process_existing)
+        automation_layout.addRow(self.route_unknown)
         automation_layout.addRow(automation_note)
 
         self.exclusions = QListWidget()
@@ -178,14 +204,21 @@ class SettingsDialog(QDialog):
             Path(self.exclusions.item(index).text())
             for index in range(self.exclusions.count())
         )
+        incoming_paths = tuple(
+            Path(self.incoming_folders.item(index).text())
+            for index in range(self.incoming_folders.count())
+        )
         return replace(
             self._initial,
+            incoming_path=incoming_paths[0] if incoming_paths else None,
+            incoming_paths=incoming_paths,
             start_with_windows=self.start_with_windows.isChecked(),
             launch_minimized=self.launch_minimized.isChecked(),
             minimize_to_tray=self.minimize_to_tray.isChecked(),
             start_automatic=self.start_automatic.isChecked(),
             process_existing_on_start=self.process_existing.isChecked(),
             confidence_policy=ConfidencePolicy(self.confidence_policy.currentData()),
+            route_unknown_to_folder=self.route_unknown.isChecked(),
             exclusions=exclusions,
         )
 
@@ -208,6 +241,11 @@ class SettingsDialog(QDialog):
 
         self._initial = settings
 
+    def set_incoming_paths(self, paths: tuple[Path, ...]) -> None:
+        self.incoming_folders.clear()
+        for path in paths:
+            self.incoming_folders.addItem(str(path))
+
     def _add_exclusion(self) -> None:
         selected = QFileDialog.getExistingDirectory(self, "Choose folder to exclude")
         if not selected:
@@ -219,6 +257,22 @@ class SettingsDialog(QDialog):
         }
         if candidate not in existing:
             self.exclusions.addItem(str(candidate))
+
+    def _add_incoming(self) -> None:
+        selected = QFileDialog.getExistingDirectory(self, "Choose incoming folder")
+        if not selected:
+            return
+        candidate = Path(selected).resolve(strict=False)
+        existing = {
+            Path(self.incoming_folders.item(index).text()).resolve(strict=False)
+            for index in range(self.incoming_folders.count())
+        }
+        if candidate not in existing:
+            self.incoming_folders.addItem(str(candidate))
+
+    def _remove_incoming(self) -> None:
+        for item in self.incoming_folders.selectedItems():
+            self.incoming_folders.takeItem(self.incoming_folders.row(item))
 
     def _remove_exclusion(self) -> None:
         for item in self.exclusions.selectedItems():

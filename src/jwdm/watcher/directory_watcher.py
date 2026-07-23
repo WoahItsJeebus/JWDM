@@ -1,4 +1,4 @@
-"""Nonrecursive watchdog adapter for one incoming folder."""
+"""Nonrecursive watchdog adapter used once per incoming folder."""
 
 from __future__ import annotations
 
@@ -7,6 +7,10 @@ from pathlib import Path
 from typing import Protocol
 
 from watchdog.events import (
+    DirCreatedEvent,
+    DirDeletedEvent,
+    DirModifiedEvent,
+    DirMovedEvent,
     FileCreatedEvent,
     FileDeletedEvent,
     FileModifiedEvent,
@@ -40,19 +44,19 @@ class _IncomingEventHandler(FileSystemEventHandler):
         self._suppressor = suppressor
 
     def on_created(self, event: FileSystemEvent) -> None:
-        if isinstance(event, FileCreatedEvent):
+        if isinstance(event, (FileCreatedEvent, DirCreatedEvent)):
             self._emit(FileWatchEvent(WatchEventType.CREATED, Path(event.src_path)))
 
     def on_modified(self, event: FileSystemEvent) -> None:
-        if isinstance(event, FileModifiedEvent):
+        if isinstance(event, (FileModifiedEvent, DirModifiedEvent)):
             self._emit(FileWatchEvent(WatchEventType.MODIFIED, Path(event.src_path)))
 
     def on_deleted(self, event: FileSystemEvent) -> None:
-        if isinstance(event, FileDeletedEvent):
+        if isinstance(event, (FileDeletedEvent, DirDeletedEvent)):
             self._emit(FileWatchEvent(WatchEventType.DELETED, Path(event.src_path)))
 
     def on_moved(self, event: FileSystemEvent) -> None:
-        if not isinstance(event, FileMovedEvent):
+        if not isinstance(event, (FileMovedEvent, DirMovedEvent)):
             return
         source = Path(event.src_path)
         destination = Path(event.dest_path)

@@ -1,4 +1,4 @@
-"""Phase 2 automatic event, readiness, classification, and move orchestration."""
+"""Multi-root automatic event, readiness, classification, and move orchestration."""
 
 from __future__ import annotations
 
@@ -17,8 +17,10 @@ from jwdm.logging_config import APPLICATION_LOGGER
 from jwdm.persistence.state import StateError, StateRepository
 from jwdm.pipeline.candidate import CandidateSnapshot, CandidateState
 from jwdm.pipeline.models import (
+    Classification,
     ClassificationDisposition,
     PlanItem,
+    PlanItemKind,
     PlanItemStatus,
 )
 from jwdm.pipeline.result import StageOutcome
@@ -28,6 +30,7 @@ from jwdm.pipeline.stages.temporary import TemporaryFileStage
 from jwdm.services.candidate_registry import CandidateRegistry
 from jwdm.services.destinations import destination_for
 from jwdm.services.exclusions import ExclusionMatcher
+from jwdm.services.folder_snapshot import FolderSnapshotError, snapshot_folder
 from jwdm.services.move_transaction import MoveTransactionService
 from jwdm.services.operation_suppression import OperationSuppressor
 from jwdm.services.path_validation import PathValidator
@@ -54,7 +57,7 @@ def _is_link_or_junction(path: Path) -> bool:
 
 
 class AutomaticOrganizer:
-    """Run the automatic pipeline for one session-configured incoming folder."""
+    """Run one safe automatic pipeline across configured incoming folders."""
 
     def __init__(
         self,
@@ -95,8 +98,9 @@ class AutomaticOrganizer:
         self._state_lock = threading.RLock()
         self._stop_event = threading.Event()
         self._worker: threading.Thread | None = None
-        self._watcher: Watcher | None = None
+        self._watchers: tuple[Watcher, ...] = ()
         self._incoming_root: Path | None = None
+        self._incoming_roots: tuple[Path, ...] = ()
         self._library_root: Path | None = None
         self._destination_status: DestinationStatus | None = None
         self._running = False
@@ -118,6 +122,11 @@ class AutomaticOrganizer:
         with self._state_lock:
             return self._incoming_root
 
+    @property
+    def incoming_roots(self) -> tuple[Path, ...]:
+        with self._state_lock:
+            return self._incoming_roots
+
     def subscribe(self, callback: CandidateCallback) -> None:
         self._callbacks.append(callback)
 
@@ -127,9 +136,20 @@ class AutomaticOrganizer:
     def snapshots(self) -> tuple[CandidateSnapshot, ...]:
         return self._registry.snapshots()
 
+    def snapshot(self, candidate_id: str) -> CandidateSnapshot | None:
+        return self._registry.get(candidate_id)
+
+    def retry_review(self, candidate_id: str) -> None:
+        if self._registry.reset_for_review_retry(candidate_id, datetime.now(UTC)) is not None:
+            self._logger.info(
+                "Candidate review restarted after rule change",
+                extra={"event": "candidate_review_retried", "candidate_id": candidate_id},
+            )
+            self._publish()
+
     def start(
         self,
-        incoming_root: Path,
+        incoming_root: Path | tuple[Path, ...],
         library_root: Path,
         *,
         process_existing: bool = False,
@@ -138,15 +158,27 @@ class AutomaticOrganizer:
             if self._running:
                 raise RuntimeError("Automatic organization is already running.")
         destination_status = self._destination_resolver(library_root)
-        validated = self._validator.validate_automatic(
-            incoming_root,
+        requested_roots = (
+            (incoming_root,) if isinstance(incoming_root, Path) else tuple(incoming_root)
+        )
+        validated = self._validator.validate_automatic_roots(
+            requested_roots,
             library_root,
             destination_status.path if destination_status.available else None,
         )
-        normalized_incoming = validated.roots[0].path
+        normalized_incoming = tuple(root.path for root in validated.roots)
         configured_library = library_root.expanduser().resolve(strict=False)
 
-        watcher = self._watcher_factory(normalized_incoming, self.handle_event, self._suppressor)
+        watchers = tuple(
+            self._watcher_factory(
+                root,
+                lambda event, watched_root=root: self.handle_event(
+                    event, incoming_root=watched_root
+                ),
+                self._suppressor,
+            )
+            for root in normalized_incoming
+        )
         self._registry.clear()
         self._stop_event.clear()
         worker = threading.Thread(
@@ -155,20 +187,23 @@ class AutomaticOrganizer:
             daemon=True,
         )
         with self._state_lock:
-            self._incoming_root = normalized_incoming
+            self._incoming_root = normalized_incoming[0]
+            self._incoming_roots = normalized_incoming
             self._library_root = configured_library
             self._destination_status = destination_status
-            self._watcher = watcher
+            self._watchers = watchers
             self._worker = worker
             self._paused = False
             self._running = True
-        watcher_started = False
+        started_watchers: list[Watcher] = []
         try:
-            watcher.start()
-            watcher_started = True
-            self._restore_candidates(normalized_incoming, process_existing)
+            for watcher in watchers:
+                watcher.start()
+                started_watchers.append(watcher)
+            for root in normalized_incoming:
+                self._restore_candidates(root, process_existing)
         except Exception:
-            if watcher_started:
+            for watcher in reversed(started_watchers):
                 try:
                     watcher.stop()
                 except Exception:
@@ -178,8 +213,9 @@ class AutomaticOrganizer:
                     )
             with self._state_lock:
                 self._incoming_root = None
+                self._incoming_roots = ()
                 self._library_root = None
-                self._watcher = None
+                self._watchers = ()
                 self._worker = None
                 self._running = False
             raise
@@ -188,7 +224,8 @@ class AutomaticOrganizer:
             "Automatic organization started",
             extra={
                 "event": "automatic_started",
-                "source": str(normalized_incoming),
+                "source": "; ".join(str(path) for path in normalized_incoming),
+                "count": len(normalized_incoming),
                 "destination": str(destination_status.path),
             },
         )
@@ -199,16 +236,16 @@ class AutomaticOrganizer:
         with self._state_lock:
             if not self._running:
                 return
-            watcher = self._watcher
+            watchers = self._watchers
             worker = self._worker
             self._stop_event.set()
 
-        watcher_error: WatcherError | None = None
-        if watcher is not None:
+        watcher_errors: list[WatcherError] = []
+        for watcher in reversed(watchers):
             try:
                 watcher.stop()
             except WatcherError as error:
-                watcher_error = error
+                watcher_errors.append(error)
         if worker is not None:
             worker.join(timeout=5)
             if worker.is_alive():
@@ -217,12 +254,12 @@ class AutomaticOrganizer:
         with self._state_lock:
             self._running = False
             self._paused = False
-            self._watcher = None
+            self._watchers = ()
             self._worker = None
         self._logger.info("Automatic organization stopped", extra={"event": "automatic_stopped"})
         self._publish()
-        if watcher_error is not None:
-            raise watcher_error
+        if watcher_errors:
+            raise WatcherError("; ".join(str(error) for error in watcher_errors))
 
     def pause(self) -> None:
         with self._state_lock:
@@ -240,13 +277,22 @@ class AutomaticOrganizer:
         self._logger.info("Automatic organization resumed", extra={"event": "automatic_resumed"})
         self._publish()
 
-    def handle_event(self, event: FileWatchEvent, occurred_at: datetime | None = None) -> None:
+    def handle_event(
+        self,
+        event: FileWatchEvent,
+        occurred_at: datetime | None = None,
+        *,
+        incoming_root: Path | None = None,
+    ) -> None:
         with self._state_lock:
-            incoming_root = self._incoming_root
+            roots = self._incoming_roots
             running = self._running
-        if not running or incoming_root is None:
+        if not running:
             return
         candidate_path = event.destination or event.source
+        selected_root = incoming_root or self._root_for(candidate_path, roots)
+        if selected_root is None:
+            return
         if self._exclusions is not None and self._exclusions.matches(candidate_path):
             self._registry.remove_path(event.source)
             self._registry.remove_path(candidate_path)
@@ -258,12 +304,12 @@ class AutomaticOrganizer:
             self._registry.remove_path(event.source)
         elif event.event_type is WatchEventType.MOVED and event.destination is not None:
             snapshot = self._registry.rename(
-                event.source, event.destination, incoming_root, timestamp
+                event.source, event.destination, selected_root, timestamp
             )
         else:
             snapshot = self._registry.register_event(
                 event.source,
-                incoming_root,
+                selected_root,
                 event.event_type.value,
                 timestamp,
             )
@@ -283,6 +329,14 @@ class AutomaticOrganizer:
                 },
             )
         self._publish()
+
+    @staticmethod
+    def _root_for(path: Path, roots: tuple[Path, ...]) -> Path | None:
+        try:
+            parent = path.resolve(strict=False).parent
+        except OSError:
+            return None
+        return next((root for root in roots if parent == root), None)
 
     def tick(self, now: datetime | None = None) -> None:
         with self._state_lock:
@@ -376,18 +430,33 @@ class AutomaticOrganizer:
         except OSError as error:
             self._defer(current, observed_at, f"Cannot inspect file: {error}")
             return
-        if not stat.S_ISREG(file_stat.st_mode):
+        is_file = stat.S_ISREG(file_stat.st_mode)
+        is_directory = stat.S_ISDIR(file_stat.st_mode)
+        if not is_file and not is_directory:
             self._registry.transition(
                 current.candidate_id,
                 CandidateState.FAILED,
-                "Candidate is not a regular file",
+                "Candidate is neither a regular file nor a directory",
             )
             return
 
+        folder_snapshot = None
+        if is_directory:
+            try:
+                folder_snapshot = snapshot_folder(current.source_path)
+            except FolderSnapshotError as error:
+                self._defer(current, observed_at, str(error))
+                return
+            observed_size = folder_snapshot.total_size
+            observed_modified = folder_snapshot.modified_token
+        else:
+            observed_size = file_stat.st_size
+            observed_modified = file_stat.st_mtime_ns
+
         observed, changed = self._registry.observe(
             current.candidate_id,
-            file_stat.st_size,
-            file_stat.st_mtime_ns,
+            observed_size,
+            observed_modified,
             observed_at,
         )
         if observed is None:
@@ -409,24 +478,26 @@ class AutomaticOrganizer:
             )
             return
 
-        try:
-            access = self._access_probe.probe(observed.source_path)
-        except OSError as error:
-            self._defer(
-                observed,
-                observed_at,
-                f"File access probe failed: {error}",
-                state=CandidateState.WAITING_FOR_ACCESS,
-            )
-            return
-        if access.outcome is not StageOutcome.PASS:
-            self._defer(
-                observed,
-                observed_at,
-                access.reason,
-                state=CandidateState.WAITING_FOR_ACCESS,
-            )
-            return
+        access_paths = folder_snapshot.files if folder_snapshot is not None else (observed.source_path,)
+        for access_path in access_paths:
+            try:
+                access = self._access_probe.probe(access_path)
+            except OSError as error:
+                self._defer(
+                    observed,
+                    observed_at,
+                    f"File access probe failed for {access_path.name}: {error}",
+                    state=CandidateState.WAITING_FOR_ACCESS,
+                )
+                return
+            if access.outcome is not StageOutcome.PASS:
+                self._defer(
+                    observed,
+                    observed_at,
+                    f"{access_path.name}: {access.reason}",
+                    state=CandidateState.WAITING_FOR_ACCESS,
+                )
+                return
 
         self._registry.transition(observed.candidate_id, CandidateState.READY, stability.reason)
         self._registry.transition(
@@ -434,7 +505,15 @@ class AutomaticOrganizer:
             CandidateState.CLASSIFYING,
             "Applying offline extension classification",
         )
-        classification = self._classifier.classify(observed.source_path)
+        classification = (
+            Classification(
+                category="Folders",
+                confidence="high",
+                reason="Top-level folder candidate routes to Folders",
+            )
+            if folder_snapshot is not None
+            else self._classifier.classify(observed.source_path)
+        )
         if classification.disposition is ClassificationDisposition.EXCLUDE:
             self._registry.transition(
                 observed.candidate_id,
@@ -488,13 +567,21 @@ class AutomaticOrganizer:
         plan_item = PlanItem(
             source=observed.source_path,
             source_root=observed.incoming_root,
-            size=file_stat.st_size,
-            modified_ns=file_stat.st_mtime_ns,
+            size=observed_size,
+            modified_ns=observed_modified,
             status=PlanItemStatus.READY,
             category=classification.category,
             confidence=classification.confidence,
             reason=f"Automatic readiness passed; {classification.reason}",
             proposed_destination=proposed,
+            kind=(
+                PlanItemKind.DIRECTORY
+                if folder_snapshot is not None
+                else PlanItemKind.FILE
+            ),
+            source_fingerprint=(
+                folder_snapshot.fingerprint if folder_snapshot is not None else None
+            ),
         )
         self._registry.transition(
             observed.candidate_id,
@@ -546,15 +633,26 @@ class AutomaticOrganizer:
     def _publish(self) -> None:
         snapshots = self._registry.snapshots()
         with self._state_lock:
-            incoming_root = self._incoming_root
-        if self._state_repository is not None and incoming_root is not None:
-            try:
-                self._state_repository.save_candidates(incoming_root, snapshots)
-            except StateError:
-                self._logger.exception(
-                    "Candidate queue could not be persisted",
-                    extra={"event": "candidate_persistence_error"},
-                )
+            incoming_roots = self._incoming_roots
+        if self._state_repository is not None:
+            for incoming_root in incoming_roots:
+                try:
+                    self._state_repository.save_candidates(
+                        incoming_root,
+                        tuple(
+                            candidate
+                            for candidate in snapshots
+                            if candidate.incoming_root == incoming_root
+                        ),
+                    )
+                except StateError:
+                    self._logger.exception(
+                        "Candidate queue could not be persisted",
+                        extra={
+                            "event": "candidate_persistence_error",
+                            "source": str(incoming_root),
+                        },
+                    )
         for callback in tuple(self._callbacks):
             try:
                 callback(snapshots)
@@ -590,7 +688,7 @@ class AutomaticOrganizer:
             try:
                 if (
                     path.parent.resolve(strict=False) != incoming_root
-                    or not path.is_file()
+                    or not (path.is_file() or path.is_dir())
                     or _is_link_or_junction(path)
                     or (self._exclusions is not None and self._exclusions.matches(path))
                 ):

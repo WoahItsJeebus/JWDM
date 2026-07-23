@@ -185,7 +185,10 @@ def run(arguments: Sequence[str] | None = None) -> int:
                 "One or more interrupted operations were left in a safe but unresolved "
                 "state. Review History before changing those files.",
             )
-    classifier = RuleClassifier(state)
+    classifier = RuleClassifier(
+        state,
+        route_unknown=lambda: settings_controller.current().route_unknown_to_folder,
+    )
     exclusions = ExclusionMatcher(
         lambda: settings_controller.current().exclusions
     )
@@ -210,6 +213,7 @@ def run(arguments: Sequence[str] | None = None) -> int:
         automatic_service,
         manual_controller.refresh_activity,
         settings_controller.current,
+        settings_controller.add_rule_for_path,
     )
     tray = TrayController(application, main_window, manual_controller.start)
     automatic_controller.set_tray(tray)

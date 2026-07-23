@@ -46,7 +46,7 @@ class ArchiveClassifier:
                 if problem is not None:
                     return self._review(problem)
                 normalized = tuple(self._normalize_name(member.filename) for member in members)
-                return self._classify_signals(archive, members, normalized)
+                return self._classify_signals(path, archive, members, normalized)
         except FileNotFoundError:
             return None
         except (OSError, RuntimeError, zipfile.BadZipFile, zipfile.LargeZipFile) as error:
@@ -90,6 +90,7 @@ class ArchiveClassifier:
 
     def _classify_signals(
         self,
+        path: Path,
         archive: zipfile.ZipFile,
         members: list[zipfile.ZipInfo],
         names: tuple[str, ...],
@@ -139,6 +140,14 @@ class ArchiveClassifier:
                 category="Code",
                 confidence="high",
                 reason="ZIP metadata contains a recognized source-project marker",
+            )
+
+        normalized_filename = re.sub(r"[^a-z0-9]+", " ", path.stem.casefold()).strip()
+        if "texture pack" in normalized_filename:
+            return Classification(
+                category="Images/Textures",
+                confidence="high",
+                reason="ZIP filename contains the strong 'Texture Pack' signal",
             )
 
         segments = {part for name in lowered for part in PurePosixPath(name).parts}

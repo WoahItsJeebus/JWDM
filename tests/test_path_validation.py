@@ -45,3 +45,24 @@ def test_overlapping_sources_are_rejected(tmp_path: Path) -> None:
             (ScanRoot(parent), ScanRoot(child)),
             library,
         )
+
+
+def test_multiple_automatic_roots_are_validated_as_one_nonoverlapping_set(
+    tmp_path: Path,
+) -> None:
+    first = tmp_path / "first"
+    nested = first / "nested"
+    second = tmp_path / "second"
+    library = tmp_path / "library"
+    for path in (nested, second, library):
+        path.mkdir(parents=True)
+    validator = PathValidator()
+
+    validated = validator.validate_automatic_roots((first, second), library, library)
+
+    assert tuple(root.path for root in validated.roots) == (
+        first.resolve(),
+        second.resolve(),
+    )
+    with pytest.raises(PathValidationError, match="overlap"):
+        validator.validate_automatic_roots((first, nested), library, library)

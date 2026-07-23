@@ -89,6 +89,18 @@ def test_manual_plan_preserves_a_safe_review_category_suggestion(tmp_path: Path)
     assert plan.items[0].proposed_destination is None
 
 
+def test_texture_pack_filename_is_a_high_confidence_signal(tmp_path: Path) -> None:
+    archive_path = tmp_path / "Plastic Texture Pack 2.zip"
+    with zipfile.ZipFile(archive_path, "w") as archive:
+        archive.writestr("textures/color.png", "texture")
+
+    result = SmartClassifier().classify(archive_path)
+
+    assert result.category == "Images/Textures"
+    assert result.confidence == "high"
+    assert result.disposition is ClassificationDisposition.ROUTE
+
+
 def test_texture_filename_signal_is_generic_and_does_not_require_file_access() -> None:
     result = SmartClassifier().classify(Path("BrickWall_roughness_4k.PNG"))
 

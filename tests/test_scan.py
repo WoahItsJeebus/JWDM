@@ -17,8 +17,13 @@ def test_top_level_scan_does_not_descend(tmp_path: Path) -> None:
 
     plan = ScanService().build_plan((ScanRoot(source, False),), library)
 
-    assert [item.source.name for item in plan.items] == ["report.pdf"]
-    assert plan.items[0].category == "Documents"
+    assert [item.source.name for item in plan.items] == ["nested", "report.pdf"]
+    folder = next(item for item in plan.items if item.source.name == "nested")
+    assert folder.category == "Folders"
+    assert folder.proposed_destination == library / "Folders" / "nested"
+    assert next(item for item in plan.items if item.source.name == "report.pdf").category == (
+        "Documents"
+    )
 
 
 def test_recursive_scan_excludes_in_place_library_and_flags_unknown(tmp_path: Path) -> None:

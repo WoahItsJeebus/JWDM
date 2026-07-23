@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 from typing import Protocol
 
@@ -25,9 +26,11 @@ class RuleClassifier:
         self,
         rules: RuleProvider,
         fallback: Classifier | None = None,
+        route_unknown: Callable[[], bool] | None = None,
     ) -> None:
         self._rules = rules
         self._fallback = fallback or SmartClassifier()
+        self._route_unknown = route_unknown or (lambda: False)
 
     def classify(self, path: Path) -> Classification:
         filename = path.name.casefold()
@@ -54,4 +57,16 @@ class RuleClassifier:
                 reason=f"Explicit {identity} requires review for {rule.extension}",
                 disposition=ClassificationDisposition.REVIEW,
             )
-        return self._fallback.classify(path)
+        fallback = self._fallback.classify(path)
+        if (
+            self._route_unknown()
+            and fallback.category is None
+            and fallback.disposition is ClassificationDisposition.REVIEW
+            and fallback.reason.startswith("No built-in rule for ")
+        ):
+            return Classification(
+                category="Unknown",
+                confidence="user",
+                reason="Unknown-folder setting routes files without a matching rule to Unknown",
+            )
+        return fallback

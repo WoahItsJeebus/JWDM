@@ -31,3 +31,22 @@ def test_watchdog_reports_new_top_level_file(tmp_path: Path) -> None:
         for event in received
     )
 
+
+def test_watchdog_reports_new_top_level_folder(tmp_path: Path) -> None:
+    received: list[FileWatchEvent] = []
+    ready = threading.Event()
+
+    def collect(event: FileWatchEvent) -> None:
+        received.append(event)
+        if event.source.name == "bundle":
+            ready.set()
+
+    watcher = DirectoryWatcher(tmp_path, collect, OperationSuppressor())
+    watcher.start()
+    try:
+        (tmp_path / "bundle").mkdir()
+        assert ready.wait(timeout=5), "watchdog did not report the new folder"
+    finally:
+        watcher.stop()
+
+    assert any(event.source.name == "bundle" for event in received)

@@ -184,6 +184,43 @@ def test_cross_volume_move_is_hash_verified_and_undoable(tmp_path: Path) -> None
     assert history.operations()[-1].status is OperationStatus.UNDONE
 
 
+@pytest.mark.parametrize("same_volume", [True, False])
+def test_top_level_folder_move_is_verified_and_undoable(
+    tmp_path: Path, same_volume: bool
+) -> None:
+    incoming = tmp_path / "incoming"
+    library = tmp_path / "library"
+    bundle = incoming / "Asset Bundle"
+    nested = bundle / "textures"
+    nested.mkdir(parents=True)
+    library.mkdir()
+    (bundle / "readme.txt").write_text("bundle", encoding="utf-8")
+    (nested / "color.png").write_bytes(b"pixels")
+    item = _ready_item(bundle, library)
+    history = HistoryRepository(tmp_path / "folder-history.jsonl")
+    service = MoveTransactionService(
+        history,
+        volume_service=_Volumes(same_volume=same_volume),
+    )
+
+    result = service.execute(library, (item,))[0]
+
+    assert result.succeeded
+    assert not bundle.exists()
+    assert result.destination == library / "Folders" / "Asset Bundle"
+    assert (result.destination / "textures" / "color.png").read_bytes() == b"pixels"
+    operation = history.latest_undoable()
+    assert operation is not None
+    assert operation.source_kind == "directory"
+    assert operation.copy_verified is (not same_volume)
+
+    undo = service.undo(operation)
+
+    assert undo.succeeded
+    assert (bundle / "readme.txt").read_text(encoding="utf-8") == "bundle"
+    assert not operation.destination.exists()
+
+
 def test_insufficient_destination_space_refuses_before_journal_or_copy(
     tmp_path: Path,
 ) -> None:

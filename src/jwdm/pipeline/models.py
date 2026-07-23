@@ -14,6 +14,11 @@ class PlanItemStatus(StrEnum):
     EXCLUDED = "Excluded"
 
 
+class PlanItemKind(StrEnum):
+    FILE = "file"
+    DIRECTORY = "directory"
+
+
 class ScanStage(StrEnum):
     DISCOVERING = "discovering"
     CLASSIFYING = "classifying"
@@ -51,6 +56,8 @@ class PlanItem:
     reason: str
     proposed_destination: Path | None
     collision_behavior: str = "none"
+    kind: PlanItemKind = PlanItemKind.FILE
+    source_fingerprint: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

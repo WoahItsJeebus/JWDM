@@ -35,6 +35,19 @@ def test_user_rules_override_builtins_with_route_review_and_ignore(tmp_path: Pat
     assert fallback.category == "Images"
 
 
+def test_optional_unknown_folder_routes_only_unmatched_extensions(tmp_path: Path) -> None:
+    repository = StateRepository(tmp_path / "state.db")
+    classifier = RuleClassifier(repository, route_unknown=lambda: True)
+
+    unknown = classifier.classify(Path("download.unmapped"))
+    known = classifier.classify(Path("music.mp3"))
+
+    assert unknown.category == "Unknown"
+    assert unknown.confidence == "user"
+    assert unknown.disposition is ClassificationDisposition.ROUTE
+    assert known.category == "Audio"
+
+
 def test_manual_scan_marks_exact_exclusions_and_ignored_rules(tmp_path: Path) -> None:
     source = tmp_path / "source"
     library = tmp_path / "library"

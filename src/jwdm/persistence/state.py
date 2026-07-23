@@ -26,7 +26,7 @@ from jwdm.config import (
 from jwdm.pipeline.candidate import CandidateSnapshot, CandidateState
 from jwdm.services.destinations import validate_category
 
-STATE_SCHEMA_VERSION: Final = 3
+STATE_SCHEMA_VERSION: Final = 4
 
 
 class StateError(RuntimeError):
@@ -62,14 +62,25 @@ class StateRepository:
                             "SELECT path FROM exclusions ORDER BY path COLLATE NOCASE"
                         )
                     )
+                    incoming_paths = tuple(
+                        Path(row[0])
+                        for row in connection.execute(
+                            "SELECT path FROM incoming_folders ORDER BY sort_order, path COLLATE NOCASE"
+                        )
+                    )
             except (OSError, sqlite3.Error) as error:
                 raise StateError(f"Cannot read settings from {self.path}: {error}") from error
 
         defaults = AppSettings()
         try:
+            legacy_incoming = self._optional_path(values.get("incoming_path"))
+            configured_incoming = incoming_paths or (
+                (legacy_incoming,) if legacy_incoming is not None else ()
+            )
             return AppSettings(
                 library_path=self._optional_path(values.get("library_path")),
-                incoming_path=self._optional_path(values.get("incoming_path")),
+                incoming_path=configured_incoming[0] if configured_incoming else None,
+                incoming_paths=configured_incoming,
                 start_with_windows=self._boolean(
                     values.get("start_with_windows"), defaults.start_with_windows
                 ),
@@ -92,15 +103,20 @@ class StateRepository:
                 confidence_policy=ConfidencePolicy(
                     values.get("confidence_policy", defaults.confidence_policy.value)
                 ),
+                route_unknown_to_folder=self._boolean(
+                    values.get("route_unknown_to_folder"),
+                    defaults.route_unknown_to_folder,
+                ),
                 exclusions=exclusions,
             )
         except ValueError as error:
             raise StateError(f"Settings in {self.path} contain an invalid value: {error}") from error
 
     def save_settings(self, settings: AppSettings) -> None:
+        incoming_paths = self._normalized_paths(settings.configured_incoming_paths)
         values = {
             "library_path": str(settings.library_path) if settings.library_path else "",
-            "incoming_path": str(settings.incoming_path) if settings.incoming_path else "",
+            "incoming_path": str(incoming_paths[0]) if incoming_paths else "",
             "start_with_windows": self._encode_boolean(settings.start_with_windows),
             "launch_minimized": self._encode_boolean(settings.launch_minimized),
             "minimize_to_tray": self._encode_boolean(settings.minimize_to_tray),
@@ -110,6 +126,9 @@ class StateRepository:
                 settings.process_existing_on_start
             ),
             "confidence_policy": settings.confidence_policy.value,
+            "route_unknown_to_folder": self._encode_boolean(
+                settings.route_unknown_to_folder
+            ),
         }
         exclusions = self._normalized_exclusions(settings.exclusions)
         with self._lock:
@@ -125,6 +144,15 @@ class StateRepository:
                         "INSERT INTO exclusions(path, path_identity) VALUES(?, ?)",
                         ((str(path), _identity(path)) for path in exclusions),
                     )
+                    connection.execute("DELETE FROM incoming_folders")
+                    connection.executemany(
+                        "INSERT INTO incoming_folders(path, path_identity, sort_order) "
+                        "VALUES(?, ?, ?)",
+                        (
+                            (str(path), _identity(path), index)
+                            for index, path in enumerate(incoming_paths)
+                        ),
+                    )
             except (OSError, sqlite3.Error) as error:
                 raise StateError(f"Cannot save settings to {self.path}: {error}") from error
 
@@ -132,7 +160,10 @@ class StateRepository:
         self, library_path: Path | None, incoming_path: Path | None
     ) -> AppSettings:
         updated = replace(
-            self.settings(), library_path=library_path, incoming_path=incoming_path
+            self.settings(),
+            library_path=library_path,
+            incoming_path=incoming_path,
+            incoming_paths=(incoming_path,) if incoming_path is not None else (),
         )
         self.save_settings(updated)
         return updated
@@ -461,6 +492,18 @@ class StateRepository:
                             """
                         )
                         version = 3
+                    if version == 3:
+                        connection.executescript(
+                            """
+                            CREATE TABLE IF NOT EXISTS incoming_folders(
+                                path TEXT NOT NULL,
+                                path_identity TEXT PRIMARY KEY,
+                                sort_order INTEGER NOT NULL
+                            );
+                            PRAGMA user_version = 4;
+                            """
+                        )
+                        version = 4
                     if version != STATE_SCHEMA_VERSION:
                         raise StateError(
                             f"State database migration stopped at schema {version}; "
@@ -528,3 +571,11 @@ class StateRepository:
             normalized = path.expanduser().resolve(strict=False)
             unique.setdefault(_identity(normalized), normalized)
         return tuple(sorted(unique.values(), key=lambda path: str(path).casefold()))
+
+    @staticmethod
+    def _normalized_paths(paths: tuple[Path, ...]) -> tuple[Path, ...]:
+        unique: dict[str, Path] = {}
+        for path in paths:
+            normalized = path.expanduser().resolve(strict=False)
+            unique.setdefault(_identity(normalized), normalized)
+        return tuple(unique.values())

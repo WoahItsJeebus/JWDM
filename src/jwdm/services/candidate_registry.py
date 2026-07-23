@@ -177,6 +177,30 @@ class CandidateRegistry:
                 candidate.retry_count = 0
             return self._snapshot(candidate)
 
+    def reset_for_review_retry(
+        self, candidate_id: str, occurred_at: datetime
+    ) -> CandidateSnapshot | None:
+        """Restart every readiness observation after a user changes classification rules."""
+
+        with self._lock:
+            candidate = self._by_id.get(candidate_id)
+            if candidate is None or candidate.state is not CandidateState.NEEDS_REVIEW:
+                return None
+            candidate.last_event_at = occurred_at
+            candidate.last_size = None
+            candidate.last_modified_ns = None
+            candidate.stable_since = None
+            candidate.stable_samples = 0
+            candidate.state = CandidateState.DETECTED
+            candidate.detail = "Rule changed; readiness checks restarted"
+            candidate.proposed_category = None
+            candidate.proposed_destination = None
+            candidate.confidence = None
+            candidate.retry_count = 0
+            candidate.next_check_at = None
+            self._add_signal(candidate, "rule_changed")
+            return self._snapshot(candidate)
+
     @staticmethod
     def _add_signal(candidate: _Candidate, signal: str) -> None:
         candidate.signals.append(signal)
@@ -204,4 +228,3 @@ class CandidateRegistry:
             next_check_at=candidate.next_check_at,
             detail=candidate.detail,
         )
-

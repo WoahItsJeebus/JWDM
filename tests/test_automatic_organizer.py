@@ -52,6 +52,18 @@ class _WatcherFactory:
         return self.watcher
 
 
+class _RecordingWatcherFactory:
+    def __init__(self) -> None:
+        self.roots: list[Path] = []
+        self.watchers: list[_FakeWatcher] = []
+
+    def __call__(self, root: Path, callback, suppressor) -> _FakeWatcher:
+        watcher = _FakeWatcher()
+        self.roots.append(root)
+        self.watchers.append(watcher)
+        return watcher
+
+
 def _service(
     tmp_path: Path,
     access_probe: AccessProbe | None = None,
@@ -301,3 +313,62 @@ def test_pending_candidate_restores_and_existing_scan_is_opt_in(tmp_path: Path) 
         assert [candidate.source_path for candidate in catch_up.snapshots()] == [source]
     finally:
         catch_up.stop()
+
+
+def test_multiple_incoming_folders_are_watched_and_processed(tmp_path: Path) -> None:
+    first = tmp_path / "first-incoming"
+    second = tmp_path / "second-incoming"
+    library = tmp_path / "library"
+    for path in (first, second, library):
+        path.mkdir()
+    history = HistoryRepository(tmp_path / "history.jsonl")
+    suppressor = OperationSuppressor()
+    factory = _RecordingWatcherFactory()
+    organizer = AutomaticOrganizer(
+        MoveTransactionService(history, suppressor),
+        suppressor,
+        access_probe=_AlwaysAvailable(),
+        config=ReadinessConfig(
+            sample_interval_seconds=3600,
+            required_stable_samples=2,
+            minimum_quiet_seconds=1,
+        ),
+        watcher_factory=factory,
+    )
+    organizer.start((first, second), library)
+    started = datetime(2026, 1, 1, tzinfo=UTC)
+    one = first / "one.pdf"
+    two = second / "two.mp3"
+    one.write_bytes(b"one")
+    two.write_bytes(b"two")
+    organizer.handle_event(FileWatchEvent(WatchEventType.CREATED, one), started)
+    organizer.handle_event(FileWatchEvent(WatchEventType.CREATED, two), started)
+    try:
+        organizer.tick(started)
+        organizer.tick(started + timedelta(seconds=1))
+
+        assert factory.roots == [first.resolve(), second.resolve()]
+        assert (library / "Documents" / "one.pdf").exists()
+        assert (library / "Audio" / "two.mp3").exists()
+    finally:
+        organizer.stop()
+
+
+def test_stable_top_level_folder_moves_as_one_undoable_candidate(tmp_path: Path) -> None:
+    organizer, incoming, library, history = _service(tmp_path)
+    started = datetime(2026, 1, 1, tzinfo=UTC)
+    folder = incoming / "Downloaded Project"
+    folder.mkdir()
+    (folder / "asset.bin").write_bytes(b"asset")
+    organizer.handle_event(FileWatchEvent(WatchEventType.CREATED, folder), started)
+    try:
+        organizer.tick(started)
+        organizer.tick(started + timedelta(seconds=1))
+
+        moved = library / "Folders" / "Downloaded Project"
+        assert not folder.exists()
+        assert (moved / "asset.bin").read_bytes() == b"asset"
+        assert organizer.snapshots()[0].state is CandidateState.MOVED
+        assert history.latest_undoable() is not None
+    finally:
+        organizer.stop()

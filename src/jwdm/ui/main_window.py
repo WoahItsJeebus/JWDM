@@ -39,9 +39,12 @@ class MainWindow(QMainWindow):
     automatic_pause_requested = Signal()
     settings_requested = Signal()
     rules_requested = Signal()
+    candidate_review_requested = Signal(object)
+    candidate_rule_requested = Signal(object)
     close_requested = Signal(object)
     library_path_changed = Signal(object)
     incoming_path_changed = Signal(object)
+    incoming_paths_changed = Signal(object)
 
     def __init__(self) -> None:
         super().__init__()
@@ -51,6 +54,8 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(800, 690)
         self._automatic_running = False
         self._manual_scan_running = False
+        self._incoming_paths: tuple[Path, ...] = ()
+        self._visible_candidates: tuple[CandidateSnapshot, ...] = ()
 
         title = QLabel("JWDM")
         title.setObjectName("applicationTitle")
@@ -103,14 +108,17 @@ class MainWindow(QMainWindow):
         self.settings_button = QPushButton("Settings")
         self.settings_button.setObjectName("settingsButton")
         self.settings_button.clicked.connect(self.settings_requested.emit)
+        primary_actions = QHBoxLayout()
+        primary_actions.addWidget(self.rules_button)
+        primary_actions.addWidget(self.settings_button)
+        primary_actions.addStretch()
         manual_actions = QHBoxLayout()
         manual_actions.addWidget(self.history_button)
         manual_actions.addWidget(self.undo_button)
         manual_actions.addStretch()
-        manual_actions.addWidget(self.rules_button)
-        manual_actions.addWidget(self.settings_button)
 
         manual_group = QGroupBox("Manual organization")
+        manual_group.setObjectName("manualOrganizationGroup")
         manual_layout = QVBoxLayout(manual_group)
         manual_layout.addWidget(self.organize_button)
         manual_layout.addWidget(self.manual_scan_status_label)
@@ -120,8 +128,8 @@ class MainWindow(QMainWindow):
         self.incoming_edit = QLineEdit()
         self.incoming_edit.setObjectName("incomingPath")
         self.incoming_edit.setReadOnly(True)
-        self.incoming_edit.setPlaceholderText("Choose one incoming folder to monitor")
-        self.browse_incoming_button = QPushButton("Browse…")
+        self.incoming_edit.setPlaceholderText("Configure one or more incoming folders")
+        self.browse_incoming_button = QPushButton("Add…")
         self.browse_incoming_button.setObjectName("browseIncomingButton")
         self.browse_incoming_button.clicked.connect(self.incoming_browse_requested.emit)
         incoming_row = QHBoxLayout()
@@ -144,12 +152,16 @@ class MainWindow(QMainWindow):
         self.automatic_status_label.setObjectName("automaticStatus")
         self.candidate_counts_label = QLabel("Pending: 0 • Needs review: 0")
         self.candidate_counts_label.setObjectName("candidateCounts")
+        automatic_status_row = QHBoxLayout()
+        automatic_status_row.addWidget(self.automatic_status_label, stretch=1)
+        automatic_status_row.addWidget(self.candidate_counts_label)
 
         self.candidate_table = QTableWidget(0, 3)
         self.candidate_table.setObjectName("candidateTable")
         self.candidate_table.setHorizontalHeaderLabels(["File", "State", "Detail"])
         self.candidate_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.candidate_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.candidate_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.candidate_table.horizontalHeader().setSectionResizeMode(
             0, QHeaderView.ResizeMode.Stretch
         )
@@ -159,16 +171,17 @@ class MainWindow(QMainWindow):
         self.candidate_table.horizontalHeader().setSectionResizeMode(
             2, QHeaderView.ResizeMode.Stretch
         )
-        self.candidate_table.setMaximumHeight(180)
+        self.candidate_table.setMinimumHeight(180)
+        self.candidate_table.cellDoubleClicked.connect(self._candidate_double_clicked)
 
         automatic_group = QGroupBox("Automatic organization")
+        automatic_group.setObjectName("automaticOrganizationGroup")
         automatic_layout = QVBoxLayout(automatic_group)
-        automatic_layout.addWidget(QLabel("Incoming folder (top level only)"))
+        automatic_layout.addWidget(QLabel("Incoming folders (top level only)"))
         automatic_layout.addLayout(incoming_row)
         automatic_layout.addLayout(automatic_actions)
-        automatic_layout.addWidget(self.automatic_status_label)
-        automatic_layout.addWidget(self.candidate_counts_label)
-        automatic_layout.addWidget(self.candidate_table)
+        automatic_layout.addLayout(automatic_status_row)
+        automatic_layout.addWidget(self.candidate_table, stretch=1)
 
         self.activity_label = QLabel("No organization activity yet.")
         self.activity_label.setObjectName("recentActivity")
@@ -179,7 +192,8 @@ class MainWindow(QMainWindow):
 
         scope_note = QLabel(
             "Automatic mode only moves recognized files allowed by the confidence policy "
-            "after stability and exclusive-access checks. Unknown formats remain in place."
+            "after stability and exclusive-access checks. Unrecognized items follow the "
+            "Unknown-folder policy in Settings."
         )
         scope_note.setAlignment(Qt.AlignmentFlag.AlignCenter)
         scope_note.setWordWrap(True)
@@ -189,11 +203,12 @@ class MainWindow(QMainWindow):
         layout.setSpacing(12)
         layout.addWidget(title)
         layout.addWidget(subtitle)
+        layout.addLayout(primary_actions)
         layout.addWidget(library_label)
         layout.addLayout(library_row)
         layout.addWidget(self.destination_status_label)
         layout.addWidget(manual_group)
-        layout.addWidget(automatic_group)
+        layout.addWidget(automatic_group, stretch=1)
         layout.addWidget(QLabel("Recent activity"))
         layout.addWidget(self.activity_label)
         layout.addWidget(scope_note)
@@ -222,8 +237,11 @@ class MainWindow(QMainWindow):
 
     @property
     def incoming_path(self) -> Path | None:
-        value = self.incoming_edit.text().strip()
-        return Path(value) if value else None
+        return self._incoming_paths[0] if self._incoming_paths else None
+
+    @property
+    def incoming_paths(self) -> tuple[Path, ...]:
+        return self._incoming_paths
 
     @property
     def file_operations_busy(self) -> bool:
@@ -234,8 +252,21 @@ class MainWindow(QMainWindow):
         self.library_path_changed.emit(path)
 
     def set_incoming_path(self, path: Path) -> None:
-        self.incoming_edit.setText(str(path))
+        self.set_incoming_paths((path,))
         self.incoming_path_changed.emit(path)
+
+    def set_incoming_paths(self, paths: tuple[Path, ...]) -> None:
+        self._incoming_paths = paths
+        if not paths:
+            self.incoming_edit.clear()
+            self.incoming_edit.setToolTip("")
+        elif len(paths) == 1:
+            self.incoming_edit.setText(str(paths[0]))
+            self.incoming_edit.setToolTip(str(paths[0]))
+        else:
+            self.incoming_edit.setText(f"{len(paths)} incoming folders configured")
+            self.incoming_edit.setToolTip("\n".join(str(path) for path in paths))
+        self.incoming_paths_changed.emit(paths)
 
     def set_recent_activity(self, message: str) -> None:
         self.activity_label.setText(message)
@@ -300,7 +331,13 @@ class MainWindow(QMainWindow):
         )
 
     def set_candidates(self, candidates: tuple[CandidateSnapshot, ...]) -> None:
-        visible = tuple(reversed(candidates[-12:]))
+        active = tuple(
+            candidate
+            for candidate in candidates
+            if candidate.state not in {CandidateState.MOVED, CandidateState.EXCLUDED}
+        )
+        visible = tuple(reversed(active[-100:]))
+        self._visible_candidates = visible
         self.candidate_table.setRowCount(len(visible))
         for row, candidate in enumerate(visible):
             values = (candidate.source_path.name, candidate.state.value, candidate.detail)
@@ -317,6 +354,15 @@ class MainWindow(QMainWindow):
             candidate.state is CandidateState.NEEDS_REVIEW for candidate in candidates
         )
         self.candidate_counts_label.setText(f"Pending: {pending} • Needs review: {review}")
+
+    def _candidate_double_clicked(self, row: int, column: int) -> None:
+        if row < 0 or row >= len(self._visible_candidates):
+            return
+        candidate = self._visible_candidates[row]
+        if column == 2 and candidate.detail.startswith("No built-in rule for "):
+            self.candidate_rule_requested.emit(candidate)
+            return
+        self.candidate_review_requested.emit(candidate)
 
     def bring_to_front(self) -> None:
         """Show and focus the existing main window."""
